@@ -1,5 +1,7 @@
 """Tool registry: JSON schemas sent to the model, and a Toolbox that validates input and dispatches."""
 
+import json
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -10,6 +12,7 @@ from .cache import DiskCache
 from .calculator import calculator
 from .fetch import fetch_page
 from .search import web_search
+from .security import Provenance, wrap_untrusted
 
 TOOL_SCHEMAS = [
     {
@@ -57,11 +60,20 @@ TOOL_SCHEMAS = [
 _REQUIRED = {s["name"]: s["input_schema"]["required"] for s in TOOL_SCHEMAS}
 
 
+RETRY_DELAYS_S = (1.0, 3.0)
+
+
 class Toolbox:
-    def __init__(self, settings: Settings, http: httpx.Client | None = None):
+    def __init__(self, settings: Settings, http: httpx.Client | None = None, sleep=time.sleep):
         self.settings = settings
         self.http = http or httpx.Client()
         self.cache = DiskCache(settings.cache_dir, enabled=settings.use_cache)
+        self.sleep = sleep
+        self.provenance = Provenance()
+
+    def start_run(self, question: str) -> None:
+        """Reset per-run state. URLs in the question count as trusted provenance."""
+        self.provenance = Provenance.from_text(question)
 
     def run(self, name: str, tool_input: dict) -> ToolResult:
         if name not in _REQUIRED:
@@ -73,14 +85,41 @@ class Toolbox:
         if name == "calculator":
             return calculator(str(tool_input["expression"]))
 
+        defenses = self.settings.defenses
+        if defenses and name == "fetch_page":
+            reason = self.provenance.check(str(tool_input["url"]))
+            if reason:
+                return ToolResult(ok=False, content=reason, blocked=True)
+
+        result = self._run_web_tool(name, tool_input, retries=RETRY_DELAYS_S if defenses else ())
+        if not result.ok:
+            return result
+
+        if name == "web_search":
+            # Only the result URLs themselves, never URLs mentioned inside snippets.
+            for item in json.loads(result.content):
+                self.provenance.add_url(item["url"])
+        else:
+            self.provenance.add_url(str(tool_input["url"]))
+        if defenses:
+            source = tool_input["url"] if name == "fetch_page" else f"search: {tool_input['query']}"
+            result.content = wrap_untrusted(name, str(source), result.content)
+        return result
+
+    def _run_web_tool(self, name: str, tool_input: dict, retries: tuple[float, ...]) -> ToolResult:
         cached = self.cache.get(name, tool_input)
         if cached is not None:
             return ToolResult(ok=True, content=cached, cached=True)
 
-        if name == "web_search":
-            result = web_search(self.http, self.settings.tavily_api_key, str(tool_input["query"]), tool_input.get("k", 5))
-        else:
-            result = fetch_page(self.http, str(tool_input["url"]))
+        for delay in (*retries, None):
+            if name == "web_search":
+                result = web_search(self.http, self.settings.tavily_api_key, str(tool_input["query"]),
+                                    tool_input.get("k", 5))
+            else:
+                result = fetch_page(self.http, str(tool_input["url"]))
+            if result.ok or not result.retryable or delay is None:
+                break
+            self.sleep(delay)
 
         # Local pages (benchmark fixtures) change while we edit them, so never cache them.
         is_local = name == "fetch_page" and urlparse(str(tool_input["url"])).hostname in ("127.0.0.1", "localhost")

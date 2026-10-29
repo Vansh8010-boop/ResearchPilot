@@ -74,3 +74,13 @@ def test_summarize():
     assert s["by_task"] == {"f1": "1/2"}
     assert s["est_cost_usd"] == 8.0
     json.dumps(s)
+
+
+def test_injection_suite_shape():
+    bench = Path(__file__).parents[1] / "bench"
+    tasks = load_tasks(bench / "injection_tasks.jsonl", None)
+    assert [t["id"] for t in tasks] == ["i1", "i2", "i3", "i4", "i5", "i6"]
+    for task in tasks:
+        assert task["category"] == "adversarial"
+        page = task["question"].split("{fixtures}/")[1].split()[0]
+        assert (bench / "fixtures" / page).exists(), page

@@ -1,15 +1,19 @@
 """Shared pieces for every agent: the model call (with tracing) and a bounded tool-use loop."""
 
+import json
 import time
 from dataclasses import dataclass
 
 from ..providers import ProviderError, ToolCallRejected
 from ..tools import TOOL_SCHEMAS, Toolbox
+from ..tools.base import ToolResult
 from ..tracing import Trace
 from .base import EventCallback
 
 
 TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
+DUPLICATE_NOTE = ("Duplicate call blocked: you already made this exact call. Use its earlier result, "
+                  "or try a different query or source.")
 
 
 class LLMError(Exception):
@@ -21,13 +25,18 @@ def text_of(response) -> str:
 
 
 class LLM:
-    """Wraps a provider backend: counts calls and records every call in the trace."""
+    """Wraps a provider backend: counts calls and tokens, records every call in the trace."""
 
-    def __init__(self, backend, trace: Trace, on_event: EventCallback):
+    def __init__(self, backend, trace: Trace, on_event: EventCallback, token_budget: int | None = None):
         self.backend = backend
         self.trace = trace
         self.on_event = on_event
+        self.token_budget = token_budget
         self.calls = 0
+        self.tokens = 0
+
+    def over_budget(self) -> bool:
+        return self.token_budget is not None and self.tokens >= self.token_budget
 
     def call(self, phase: str, system: str, messages: list, tool_choice: str | None = "auto",
              json_schema: dict | None = None):
@@ -43,6 +52,7 @@ class LLM:
             self.trace.llm_call(phase, self.calls, time.perf_counter() - started, "api_error", None, str(exc))
             raise LLMError(str(exc)) from exc
 
+        self.tokens += (response.usage.input_tokens or 0) + (response.usage.output_tokens or 0)
         text = text_of(response)
         self.trace.llm_call(phase, self.calls, time.perf_counter() - started, response.stop_reason, response.usage, text)
         self.on_event("llm", {"phase": phase, "step": self.calls, "text": text, "stop_reason": response.stop_reason})
@@ -65,15 +75,18 @@ class LoopResult:
 
 
 def tool_loop(llm: LLM, toolbox: Toolbox, phase: str, system: str, messages: list,
-              max_turns: int, limit_note: str) -> LoopResult:
+              max_turns: int, limit_note: str, dedupe: bool = False) -> LoopResult:
     """Call the model, run the tools it asks for, feed results back; at most `max_turns` tool turns.
 
-    When the limit is hit, `limit_note` is appended and one last call is made with tools disabled,
-    so the caller always gets text back. Mutates `messages`. Raises LLMError on API failure.
+    The loop also stops early when the run's token budget is used up. When either limit is hit,
+    `limit_note` is appended and one last call is made with tools disabled, so the caller always
+    gets text back. With `dedupe`, a call identical to an earlier one in this loop is not run again.
+    Mutates `messages`. Raises LLMError on API failure.
     """
     turns = 0
+    seen_calls: set[str] = set()
     while True:
-        out_of_turns = turns >= max_turns
+        out_of_turns = turns >= max_turns or llm.over_budget()
         try:
             response = llm.call(phase, system, messages, tool_choice="none" if out_of_turns else "auto")
         except ToolCallRejected as exc:
@@ -88,7 +101,7 @@ def tool_loop(llm: LLM, toolbox: Toolbox, phase: str, system: str, messages: lis
             turns += 1
             note = (f"Your last tool call was rejected: {exc.detail}. "
                     f"The only tools are {', '.join(TOOL_NAMES)}. Use one of them, or answer.")
-            if turns >= max_turns:
+            if turns >= max_turns or llm.over_budget():
                 note += "\n\n" + limit_note
             _append_note(messages, note)
             continue
@@ -105,12 +118,19 @@ def tool_loop(llm: LLM, toolbox: Toolbox, phase: str, system: str, messages: lis
         for block in response.content:
             if block.type != "tool_use":
                 continue
+            tool_input = dict(block.input)
+            key = f"{block.name}:{json.dumps(tool_input, sort_keys=True)}"
             started = time.perf_counter()
-            result = toolbox.run(block.name, dict(block.input))
-            llm.trace.tool_call(phase, llm.calls, block.name, dict(block.input), result.ok, result.content,
-                                result.cached, time.perf_counter() - started)
-            llm.on_event("tool", {"phase": phase, "step": llm.calls, "name": block.name, "input": dict(block.input),
-                                  "ok": result.ok, "cached": result.cached, "output": result.content})
+            if dedupe and key in seen_calls:
+                result = ToolResult(ok=False, content=DUPLICATE_NOTE, blocked=True)
+            else:
+                result = toolbox.run(block.name, tool_input)
+            seen_calls.add(key)
+            llm.trace.tool_call(phase, llm.calls, block.name, tool_input, result.ok, result.content,
+                                result.cached, time.perf_counter() - started, blocked=result.blocked)
+            llm.on_event("tool", {"phase": phase, "step": llm.calls, "name": block.name, "input": tool_input,
+                                  "ok": result.ok, "cached": result.cached, "output": result.content,
+                                  "blocked": result.blocked})
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -118,6 +138,6 @@ def tool_loop(llm: LLM, toolbox: Toolbox, phase: str, system: str, messages: lis
                 "is_error": not result.ok,
             })
 
-        if turns >= max_turns:
+        if turns >= max_turns or llm.over_budget():
             tool_results.append({"type": "text", "text": limit_note})
         messages.append({"role": "user", "content": tool_results})

@@ -8,7 +8,9 @@ class ToolResult:
     ok: bool
     content: str
     cached: bool = False
+    retryable: bool = False  # transient failure (timeout, 429, 5xx) worth retrying
+    blocked: bool = False  # refused by a policy before running (URL policy, duplicate call)
 
 
-def error(message: str) -> ToolResult:
-    return ToolResult(ok=False, content=message)
+def error(message: str, retryable: bool = False) -> ToolResult:
+    return ToolResult(ok=False, content=message, retryable=retryable)

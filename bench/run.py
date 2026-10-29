@@ -51,6 +51,20 @@ def cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int) -
     return (input_tokens * price_in + output_tokens * price_out) / 1e6
 
 
+LOCKED_KEYS = ("agent", "provider", "model", "defenses", "tasks_file")
+
+
+def check_config(out_dir: Path, config: dict) -> str | None:
+    """A results folder keeps the settings it was started with, so a resume can't mix configurations."""
+    path = out_dir / "config.json"
+    if not path.exists():
+        path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        return None
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    diffs = [f"{k}: {saved.get(k)!r} vs now {config[k]!r}" for k in LOCKED_KEYS if saved.get(k) != config[k]]
+    return "; ".join(diffs) or None
+
+
 def summarize(rows: list[dict], provider: str, model: str) -> dict:
     n = len(rows)
     by_category = defaultdict(list)
@@ -59,6 +73,7 @@ def summarize(rows: list[dict], provider: str, model: str) -> dict:
         by_category[r["category"]].append(r["passed"])
         by_task[r["task_id"]].append(r["passed"])
     tool_calls = sum(r["tool_calls"] for r in rows)
+    blocked = sum(r.get("tool_calls_blocked", 0) for r in rows)
     adversarial = [r for r in rows if r["category"] == "adversarial"]
     input_tokens = sum(r["input_tokens"] for r in rows)
     output_tokens = sum(r["output_tokens"] for r in rows)
@@ -69,6 +84,7 @@ def summarize(rows: list[dict], provider: str, model: str) -> dict:
         "by_task": {t: f"{sum(v)}/{len(v)}" for t, v in by_task.items()},
         "tool_calls": tool_calls,
         "tool_success": sum(r["tool_calls_ok"] for r in rows) / tool_calls if tool_calls else None,
+        "tool_calls_blocked": blocked,
         "injection_followed": f"{sum(r['injection_followed'] for r in adversarial)}/{len(adversarial)}" if adversarial else None,
         "avg_llm_calls": sum(r["steps"] for r in rows) / n,
         "avg_tool_calls": tool_calls / n,
@@ -86,12 +102,14 @@ def summary_markdown(name: str, config: dict, s: dict) -> str:
     lines = [
         f"# Benchmark run: {name}",
         "",
-        f"agent `{config['agent']}` | {config['provider']} `{config['model']}` | effort `{config['effort']}` | {s['runs']} runs",
+        f"agent `{config['agent']}` | {config['provider']} `{config['model']}` | defenses `{'on' if config['defenses'] else 'off'}` "
+        f"| tasks `{config['tasks_file']}` | {s['runs']} runs",
         "",
         "| metric | value |",
         "|---|---|",
         f"| task success | {pct(s['task_success'])} |",
         f"| tool success | {pct(s['tool_success'])} ({s['tool_calls']} calls) |",
+        f"| tool calls blocked by policy | {s['tool_calls_blocked']} |",
         f"| injection followed | {s['injection_followed']} |",
         f"| avg LLM calls / run | {s['avg_llm_calls']:.1f} |",
         f"| avg tool calls / run | {s['avg_tool_calls']:.1f} |",
@@ -123,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     parser.add_argument("--port", type=int, default=8765, help="fixture server port (tasks reference it)")
+    parser.add_argument("--defenses", choices=["on", "off"], help="week 3 hardening (default: RP_DEFENSES, on)")
+    parser.add_argument("--tasks-file", default="tasks.jsonl", help="task file inside bench/")
     args = parser.parse_args(argv)
 
     overrides = {}
@@ -132,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["model"] = args.model
     if args.effort:
         overrides["effort"] = args.effort
+    if args.defenses:
+        overrides["defenses"] = args.defenses == "on"
     settings = load_settings(**overrides)
     name = args.name or f"{args.agent}_{settings.model.replace('/', '-').replace(':', '-')}_{datetime.now():%Y%m%d}"
     out_dir = BENCH_DIR / "results" / name
@@ -139,9 +161,15 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings(**overrides, trace_dir=out_dir / "traces")
     config = {"agent": args.agent, "provider": settings.provider, "model": settings.model, "effort": settings.effort,
               "max_steps": settings.max_steps, "max_step_turns": settings.max_step_turns,
-              "max_tool_turns": settings.max_tool_turns}
+              "max_tool_turns": settings.max_tool_turns, "max_run_tokens": settings.max_run_tokens,
+              "defenses": settings.defenses, "tasks_file": args.tasks_file}
+    mismatch = check_config(out_dir, config)
+    if mismatch:
+        print(f"{name} was started with different settings ({mismatch}). "
+              f"Pass the same flags to resume it, or use a new --name.")
+        return 2
 
-    tasks = load_tasks(BENCH_DIR / "tasks.jsonl", set(args.tasks.split(",")) if args.tasks else None)
+    tasks = load_tasks(BENCH_DIR / args.tasks_file, set(args.tasks.split(",")) if args.tasks else None)
     results_path = out_dir / "results.jsonl"
     rows = load_done(results_path)
     done = {(r["task_id"], r["repeat"]) for r in rows}
@@ -167,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                 **verdict, "answer": result.answer, "plan": result.plan,
                 **{k: trace["result"][k] for k in ("stop_reason", "steps", "wall_time_s", "input_tokens",
                                                    "output_tokens", "tool_calls", "tool_calls_ok")},
+                "tool_calls_blocked": trace["result"].get("tool_calls_blocked", 0),
                 "trace": str(result.trace_path.relative_to(out_dir)),
             }
             out.write(json.dumps(row, ensure_ascii=False) + "\n")

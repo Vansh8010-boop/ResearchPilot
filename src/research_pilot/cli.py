@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--defenses", choices=["on", "off"], help="week 3 hardening (default: on)")
     parser.add_argument("--no-cache", action="store_true", help="ignore and don't write the tool cache")
     parser.add_argument("--quiet", action="store_true", help="print only the final answer")
     args = parser.parse_args(argv)
@@ -49,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["effort"] = args.effort
     if args.max_steps:
         overrides["max_steps"] = args.max_steps
+    if args.defenses:
+        overrides["defenses"] = args.defenses == "on"
     settings = load_settings(**overrides)
 
     agent = AGENTS[args.agent](settings, Toolbox(settings), on_event=None if args.quiet else _print_event)

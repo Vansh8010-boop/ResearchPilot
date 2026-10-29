@@ -32,11 +32,12 @@ def fetch_page(http: httpx.Client, url: str) -> ToolResult:
     try:
         response = http.get(url, headers={"User-Agent": USER_AGENT}, timeout=15.0, follow_redirects=True)
     except httpx.TimeoutException:
-        return error(f"fetch timed out: {url}; try another source")
+        return error(f"fetch timed out: {url}; try another source", retryable=True)
     except httpx.HTTPError as exc:
-        return error(f"fetch failed: {type(exc).__name__}: {exc}")
+        return error(f"fetch failed: {type(exc).__name__}: {exc}", retryable=True)
     if response.status_code != 200:
-        return error(f"fetch failed: HTTP {response.status_code} for {url}; try another source")
+        return error(f"fetch failed: HTTP {response.status_code} for {url}; try another source",
+                     retryable=response.status_code == 429 or response.status_code >= 500)
 
     content_type = response.headers.get("content-type", "").lower()
     if not content_type.startswith(TEXT_TYPES):

@@ -36,7 +36,7 @@ class Trace:
         })
 
     def tool_call(self, phase: str, step: int, name: str, tool_input: dict, ok: bool, output: str,
-                  cached: bool, latency_s: float) -> None:
+                  cached: bool, latency_s: float, blocked: bool = False) -> None:
         self.data["events"].append({
             "type": "tool_call",
             "phase": phase,
@@ -44,6 +44,7 @@ class Trace:
             "name": name,
             "input": tool_input,
             "ok": ok,
+            "blocked": blocked,
             "cached": cached,
             "latency_s": round(latency_s, 3),
             "output_chars": len(output),
@@ -56,6 +57,7 @@ class Trace:
     def finish(self, answer: str | None, stop_reason: str, steps: int) -> Path:
         llm_events = [e for e in self.data["events"] if e["type"] == "llm_call"]
         tool_events = [e for e in self.data["events"] if e["type"] == "tool_call"]
+        executed = [e for e in tool_events if not e.get("blocked")]
         self.data["result"] = {
             "answer": answer,
             "stop_reason": stop_reason,
@@ -63,8 +65,10 @@ class Trace:
             "wall_time_s": round(time.perf_counter() - self.started, 3),
             "input_tokens": sum(e["input_tokens"] or 0 for e in llm_events),
             "output_tokens": sum(e["output_tokens"] or 0 for e in llm_events),
-            "tool_calls": len(tool_events),
-            "tool_calls_ok": sum(e["ok"] for e in tool_events),
+            # Blocked calls (URL policy, duplicates) never ran, so they are counted apart from tool success.
+            "tool_calls": len(executed),
+            "tool_calls_ok": sum(e["ok"] for e in executed),
+            "tool_calls_blocked": len(tool_events) - len(executed),
         }
         self.trace_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

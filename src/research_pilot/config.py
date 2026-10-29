@@ -26,6 +26,8 @@ class Settings:
     max_step_turns: int
     max_tool_turns: int
     max_tokens: int
+    max_run_tokens: int
+    defenses: bool
     base_url: str | None
     api_key: str | None
     tavily_api_key: str | None
@@ -50,6 +52,8 @@ def load_settings(**overrides) -> Settings:
         max_step_turns=int(os.getenv("RP_MAX_STEP_TURNS", "4")),
         max_tool_turns=int(os.getenv("RP_MAX_TOOL_TURNS", "16")),
         max_tokens=int(os.getenv("RP_MAX_TOKENS", "16000")),
+        max_run_tokens=int(os.getenv("RP_MAX_RUN_TOKENS", "60000")),
+        defenses=os.getenv("RP_DEFENSES", "on").lower() not in ("off", "0", "false", "no"),
         base_url=os.getenv("RP_BASE_URL", base_url),
         api_key=os.getenv(key_env) if key_env else None,
         tavily_api_key=os.getenv("TAVILY_API_KEY") or None,

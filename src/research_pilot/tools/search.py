@@ -29,9 +29,10 @@ def web_search(http: httpx.Client, api_key: str | None, query: str, k: int = 5) 
             timeout=20.0,
         )
     except httpx.HTTPError as exc:
-        return error(f"search request failed: {type(exc).__name__}: {exc}")
+        return error(f"search request failed: {type(exc).__name__}: {exc}", retryable=True)
     if response.status_code != 200:
-        return error(f"search failed: HTTP {response.status_code}: {response.text[:200]}")
+        return error(f"search failed: HTTP {response.status_code}: {response.text[:200]}",
+                     retryable=response.status_code == 429 or response.status_code >= 500)
 
     results = [
         {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")[:500]}

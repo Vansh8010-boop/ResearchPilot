@@ -9,7 +9,7 @@ from ..config import Settings
 from ..providers import make_backend
 from ..tools import Toolbox
 from ..tracing import Trace
-from .base import AgentResult, EventCallback
+from .base import SECURITY_RULES, AgentResult, EventCallback, sanitize_answer
 from .llm import LLM, LLMError, tool_loop
 
 SYSTEM_PROMPT = """You are ResearchPilot, a research assistant that answers questions using tools.
@@ -47,14 +47,21 @@ class ReActAgent:
         self.on_event = on_event or (lambda kind, data: None)
 
     def run(self, question: str) -> AgentResult:
+        defenses = self.settings.defenses
         trace = Trace(question, f"{self.settings.provider}:{self.settings.model}", self.settings.trace_dir, self.name)
-        llm = LLM(self.backend, trace, self.on_event)
+        trace.note("defenses", defenses)
+        self.toolbox.start_run(question)
+        llm = LLM(self.backend, trace, self.on_event,
+                  token_budget=self.settings.max_run_tokens if defenses else None)
+        system = SYSTEM_PROMPT + ("\n\n" + SECURITY_RULES if defenses else "")
         messages: list = [{"role": "user", "content": question}]
         try:
-            loop = tool_loop(llm, self.toolbox, "react", SYSTEM_PROMPT, messages,
-                             self.settings.max_steps, STEP_LIMIT_NOTE)
+            loop = tool_loop(llm, self.toolbox, "react", system, messages,
+                             self.settings.max_steps, STEP_LIMIT_NOTE, dedupe=defenses)
             answer, stop_reason = loop.text or None, loop.stop_reason
         except LLMError:
             answer, stop_reason = None, "api_error"
+        if defenses:
+            answer = sanitize_answer(answer, self.toolbox.provenance, trace)
         self.on_event("final", {"answer": answer, "stop_reason": stop_reason, "steps": llm.calls})
         return AgentResult(answer, stop_reason, llm.calls, trace.finish(answer, stop_reason, llm.calls))

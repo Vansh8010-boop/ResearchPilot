@@ -5,7 +5,8 @@
    findings so far, and reports back a finding with sources.
 3. Synthesizer: one call, no tools, writes the final cited answer from the findings.
 
-Budgets: at most `max_step_turns` tool turns per step and `max_tool_turns` across the whole run.
+Budgets: at most `max_step_turns` tool turns per step and `max_tool_turns` across the whole run;
+with defenses on, also `max_run_tokens` tokens per run.
 """
 
 import json
@@ -16,7 +17,7 @@ from ..config import Settings
 from ..providers import make_backend
 from ..tools import Toolbox
 from ..tracing import Trace
-from .base import AgentResult, EventCallback
+from .base import FINDINGS_SECURITY_RULES, SECURITY_RULES, AgentResult, EventCallback, sanitize_answer
 from .llm import LLM, LLMError, text_of, tool_loop
 
 PLANNER_PROMPT = """You are the planner of a research agent. Write a short plan for answering the user's question.
@@ -115,34 +116,46 @@ class PlanExecuteAgent:
     def _execute(self, llm: LLM, question: str, plan: list[str]) -> tuple[list[str], bool]:
         findings: list[str] = []
         budget = self.settings.max_tool_turns
+        defenses = self.settings.defenses
+        out_of_tokens = False
         for index, goal in enumerate(plan, 1):
             if budget <= 0:
                 findings.append("NOT FOUND: skipped, the run's tool budget was used up.")
+                continue
+            if llm.over_budget():
+                out_of_tokens = True
+                findings.append("NOT FOUND: skipped, the run's token budget was used up.")
                 continue
             prompt = (
                 f"Question: {question}\n\nPlan:\n{_format_plan(plan, index)}\n\n"
                 f"Results so far:\n{_format_findings(findings)}\n\nCurrent step ({index}): {goal}"
             )
-            loop = tool_loop(llm, self.toolbox, f"step{index}", EXECUTOR_PROMPT,
+            system = EXECUTOR_PROMPT + ("\n\n" + SECURITY_RULES if defenses else "")
+            loop = tool_loop(llm, self.toolbox, f"step{index}", system,
                              [{"role": "user", "content": prompt}],
-                             min(self.settings.max_step_turns, budget), STEP_LIMIT_NOTE)
+                             min(self.settings.max_step_turns, budget), STEP_LIMIT_NOTE, dedupe=defenses)
             if loop.stop_reason == "refusal":
                 raise _Refused()
             budget -= loop.turns
             findings.append(loop.text or "NOT FOUND: the executor returned no text.")
             self.on_event("finding", {"step": index, "goal": goal, "finding": findings[-1]})
-        return findings, budget <= 0
+        return findings, budget <= 0 or out_of_tokens
 
     def _synthesize(self, llm: LLM, question: str, plan: list[str], findings: list[str]):
         prompt = (
             f"Question: {question}\n\nPlan that was followed:\n{_format_plan(plan)}\n\n"
             f"Findings:\n{_format_findings(findings)}"
         )
-        return llm.call("synthesize", SYNTHESIZER_PROMPT, [{"role": "user", "content": prompt}], tool_choice=None)
+        system = SYNTHESIZER_PROMPT + ("\n\n" + FINDINGS_SECURITY_RULES if self.settings.defenses else "")
+        return llm.call("synthesize", system, [{"role": "user", "content": prompt}], tool_choice=None)
 
     def run(self, question: str) -> AgentResult:
+        defenses = self.settings.defenses
         trace = Trace(question, f"{self.settings.provider}:{self.settings.model}", self.settings.trace_dir, self.name)
-        llm = LLM(self.backend, trace, self.on_event)
+        trace.note("defenses", defenses)
+        self.toolbox.start_run(question)
+        llm = LLM(self.backend, trace, self.on_event,
+                  token_budget=self.settings.max_run_tokens if defenses else None)
         plan: list[str] = []
         answer = None
         try:
@@ -161,6 +174,8 @@ class PlanExecuteAgent:
             stop_reason = "refusal"
         except LLMError:
             stop_reason = "api_error"
+        if defenses:
+            answer = sanitize_answer(answer, self.toolbox.provenance, trace)
 
         self.on_event("final", {"answer": answer, "stop_reason": stop_reason, "steps": llm.calls})
         return AgentResult(answer, stop_reason, llm.calls, trace.finish(answer, stop_reason, llm.calls), plan)
