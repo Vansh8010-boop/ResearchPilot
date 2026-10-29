@@ -158,3 +158,47 @@ def test_provider_defaults(monkeypatch):
     assert ollama.base_url == "http://localhost:11434/v1" and ollama.api_key is None
     with pytest.raises(ValueError):
         load_settings(provider="nope")
+
+
+def rejected_tool_call(tool="find"):
+    return httpx.Response(400, json={"error": {
+        "message": f"Tool call validation failed: attempted to call tool '{tool}' which was not in request.tools",
+        "type": "invalid_request_error", "code": "tool_use_failed"}})
+
+
+def test_backend_flags_rejected_tool_calls(groq_settings):
+    from research_pilot.providers import ToolCallRejected
+    server = ScriptedServer(rejected_tool_call())
+    with pytest.raises(ToolCallRejected) as info:
+        backend_for(groq_settings, server).create("s", [{"role": "user", "content": "q"}], "auto", None)
+    assert info.value.tool_name == "find"
+
+
+def test_agent_recovers_from_rejected_tool_call(groq_settings):
+    server = ScriptedServer(
+        rejected_tool_call(),
+        chat(tool_calls=[call("calculator", {"expression": "6 * 7"})], finish="tool_calls"),
+        chat("42"),
+    )
+    agent = ReActAgent(groq_settings, Toolbox(groq_settings), backend=backend_for(groq_settings, server))
+    result = agent.run("What is 6 * 7?")
+    assert result.stop_reason == "answered" and result.answer == "42"
+
+    retry_messages = server.payload(1)["messages"]
+    assert retry_messages[-1]["role"] == "user"
+    assert "What is 6 * 7?" in retry_messages[-1]["content"]
+    assert "rejected" in retry_messages[-1]["content"] and "web_search" in retry_messages[-1]["content"]
+
+    trace = json.loads(result.trace_path.read_text(encoding="utf-8"))
+    tools = [e for e in trace["events"] if e["type"] == "tool_call"]
+    assert [(t["name"], t["ok"]) for t in tools] == [("find", False), ("calculator", True)]
+    assert trace["result"]["tool_calls"] == 2 and trace["result"]["tool_calls_ok"] == 1
+
+
+def test_rejections_are_bounded(groq_settings):
+    # Every call is rejected: the loop must still end (max_steps=3 turns, then one forced call).
+    server = ScriptedServer(*[rejected_tool_call() for _ in range(groq_settings.max_steps + 1)])
+    agent = ReActAgent(groq_settings, Toolbox(groq_settings), backend=backend_for(groq_settings, server))
+    result = agent.run("q")
+    assert result.stop_reason == "max_steps"
+    assert len(server.requests) == groq_settings.max_steps + 1

@@ -6,3 +6,4 @@ __pycache__/
 traces/
 .pytest_cache/
 bench/results/*/traces/
+bench/results/*.log

@@ -10,6 +10,7 @@ Re-running with the same --name skips runs that already finished.
 
 import argparse
 import json
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -111,6 +112,8 @@ def summary_markdown(name: str, config: dict, s: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to cp1252, which can't print many characters models emit.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Run the ResearchPilot benchmark.")
     parser.add_argument("--agent", choices=sorted(AGENTS), default="plan")
     parser.add_argument("--repeats", type=int, default=3)

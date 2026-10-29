@@ -27,6 +27,8 @@ def _print_event(kind: str, data: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to cp1252, which can't print many characters models emit.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="rp", description="Ask ResearchPilot a research question.")
     parser.add_argument("question")
     parser.add_argument("--agent", choices=sorted(AGENTS), default="plan")

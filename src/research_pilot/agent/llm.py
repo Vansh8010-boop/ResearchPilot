@@ -3,10 +3,13 @@
 import time
 from dataclasses import dataclass
 
-from ..providers import ProviderError
-from ..tools import Toolbox
+from ..providers import ProviderError, ToolCallRejected
+from ..tools import TOOL_SCHEMAS, Toolbox
 from ..tracing import Trace
 from .base import EventCallback
+
+
+TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
 
 
 class LLMError(Exception):
@@ -33,6 +36,9 @@ class LLM:
         started = time.perf_counter()
         try:
             response = self.backend.create(system, messages, tool_choice, json_schema)
+        except ToolCallRejected as exc:
+            self.trace.llm_call(phase, self.calls, time.perf_counter() - started, "tool_call_rejected", None, str(exc))
+            raise
         except ProviderError as exc:
             self.trace.llm_call(phase, self.calls, time.perf_counter() - started, "api_error", None, str(exc))
             raise LLMError(str(exc)) from exc
@@ -41,6 +47,14 @@ class LLM:
         self.trace.llm_call(phase, self.calls, time.perf_counter() - started, response.stop_reason, response.usage, text)
         self.on_event("llm", {"phase": phase, "step": self.calls, "text": text, "stop_reason": response.stop_reason})
         return response
+
+
+def _append_note(messages: list, note: str) -> None:
+    """Add a text note to the last (user) message instead of starting a second user turn."""
+    content = messages[-1]["content"]
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    messages[-1]["content"] = [*content, {"type": "text", "text": note}]
 
 
 @dataclass
@@ -60,7 +74,24 @@ def tool_loop(llm: LLM, toolbox: Toolbox, phase: str, system: str, messages: lis
     turns = 0
     while True:
         out_of_turns = turns >= max_turns
-        response = llm.call(phase, system, messages, tool_choice="none" if out_of_turns else "auto")
+        try:
+            response = llm.call(phase, system, messages, tool_choice="none" if out_of_turns else "auto")
+        except ToolCallRejected as exc:
+            # The model asked for a tool that doesn't exist (or sent a malformed call). Count it as a
+            # failed tool call and tell the model, the same way a tool error would be reported.
+            name = exc.tool_name or "invalid_tool_call"
+            llm.trace.tool_call(phase, llm.calls, name, {}, False, exc.detail, False, 0.0)
+            llm.on_event("tool", {"phase": phase, "step": llm.calls, "name": name, "input": {},
+                                  "ok": False, "cached": False, "output": exc.detail})
+            if out_of_turns:
+                return LoopResult("", "max_steps", turns)
+            turns += 1
+            note = (f"Your last tool call was rejected: {exc.detail}. "
+                    f"The only tools are {', '.join(TOOL_NAMES)}. Use one of them, or answer.")
+            if turns >= max_turns:
+                note += "\n\n" + limit_note
+            _append_note(messages, note)
+            continue
         text = text_of(response)
 
         if response.stop_reason in ("refusal", "max_tokens"):

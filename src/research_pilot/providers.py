@@ -10,6 +10,7 @@ Message: `.content` (blocks with .type text / tool_use), `.stop_reason`, `.usage
 """
 
 import json
+import re
 import time
 from types import SimpleNamespace
 
@@ -26,6 +27,16 @@ MAX_RETRIES = 6
 
 class ProviderError(Exception):
     pass
+
+
+class ToolCallRejected(ProviderError):
+    """The provider refused the model's own tool call (e.g. Groq's `tool_use_failed` for a tool that
+    doesn't exist). This is a model mistake, not an outage: the agent reports it back and continues."""
+
+    def __init__(self, detail: str, tool_name: str | None):
+        super().__init__(detail)
+        self.detail = detail
+        self.tool_name = tool_name
 
 
 class AnthropicBackend:
@@ -131,6 +142,18 @@ def from_openai_response(data: dict) -> SimpleNamespace:
     )
 
 
+def _raise_if_tool_call_rejected(response: httpx.Response) -> None:
+    try:
+        error = response.json().get("error") or {}
+    except ValueError:
+        return
+    if error.get("code") != "tool_use_failed":
+        return
+    detail = error.get("message", "invalid tool call")
+    match = re.search(r"call tool '([^']+)'", detail)
+    raise ToolCallRejected(detail, match.group(1) if match else None)
+
+
 class OpenAICompatBackend:
     def __init__(self, settings: Settings, http: httpx.Client | None = None, sleep=time.sleep):
         if not settings.base_url:
@@ -159,6 +182,8 @@ class OpenAICompatBackend:
                     raise ProviderError(f"HTTP {response.status_code} (retry after {wait:.0f}s): {response.text[:300]}")
                 self.sleep(wait)
                 continue
+            if response.status_code == 400:
+                _raise_if_tool_call_rejected(response)
             raise ProviderError(f"HTTP {response.status_code}: {response.text[:300]}")
         raise ProviderError("retries exhausted")
 
