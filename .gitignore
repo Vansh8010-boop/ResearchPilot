@@ -5,3 +5,4 @@ __pycache__/
 .cache/
 traces/
 .pytest_cache/
+bench/results/*/traces/

@@ -2,14 +2,29 @@
 
 An autonomous research agent: it breaks a question down, searches the web, reads pages, does exact arithmetic, and answers with cited sources.
 
-**Status: week 1.** A ReAct loop (think → call tools → observe) with three tools, a hard step limit, a tool cache and per-run JSON traces. Plan-and-execute, the benchmark, hardening, LLM-as-judge evaluation and the FastAPI/Streamlit/Docker layer come in later weeks.
+**Status: week 2.** Two agents share three tools, a tool cache and per-run JSON traces:
+
+- `plan` (default): a planner writes a short JSON plan, an executor runs each step in its own bounded tool loop, and a synthesizer writes the cited answer from the step findings.
+- `react`: the week 1 baseline, a single think → call tools → observe loop with a hard step limit.
+
+There is also a 15-task benchmark with automatic grading. Hardening, LLM-as-judge evaluation and the FastAPI/Streamlit/Docker layer come in later weeks.
 
 ## Setup
 
 ```bash
 uv sync
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY and TAVILY_API_KEY
+cp .env.example .env
 ```
+
+Then choose a model provider in `.env`. All three run the same agents:
+
+| `RP_PROVIDER` | Key | Default model | Notes |
+|---|---|---|---|
+| `groq` (default) | `GROQ_API_KEY`, free at console.groq.com | `openai/gpt-oss-120b` | Free tier is rate limited (tokens per minute and per day). Short waits are retried automatically. |
+| `ollama` | none | `qwen2.5:7b` | Runs locally. Install Ollama, then `ollama pull qwen2.5:7b`. Small models are weaker at multi-step tool use. |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5-5` | Paid. |
+
+Web search needs `TAVILY_API_KEY` (free at app.tavily.com, no card).
 
 ## Usage
 
@@ -19,13 +34,33 @@ uv run rp --effort low --max-steps 5 "Who won the 2024 Nobel Prize in Physics, a
 uv run rp --no-cache "..."   # bypass the tool cache
 ```
 
-Each run prints the tool calls as they happen, then the final answer and the path of its trace in `traces/`.
+Each run prints the plan, the tool calls and each step's finding as they happen, then the final answer and the path of its trace in `traces/`. Add `--agent react` for the baseline agent.
+
+## Benchmark
+
+`bench/tasks.jsonl` holds 15 tasks: 4 factual lookups, 4 multi-hop, 3 calculations, 2 multi-source comparisons and 2 adversarial pages with planted prompt injections. The adversarial pages are served from `bench/fixtures/` by a local server the runner starts on port 8765. Each task has a reference answer and an automatic check (required phrases, number ranges, forbidden phrases, forbidden tool inputs).
+
+```bash
+uv run python -m bench.run --tasks f1,c3 --repeats 1 --name smoke   # quick check
+uv run python -m bench.run --agent react --name react_baseline      # 15 tasks x 3
+uv run python -m bench.run --agent plan  --name plan_baseline
+```
+
+Results go to `bench/results/<name>/`: `results.jsonl` (one line per run), `summary.md`/`summary.json` (task success, tool success, injection rate, tokens, estimated cost) and `traces/`. Runs are sequential and resumable: re-running the same `--name` skips finished runs. If the provider fails (for example, Groq's daily limit is reached), the runner stops without recording a failure. Run the same command again later to continue.
+
+Add `--provider ollama` or `--provider anthropic` to benchmark another provider. Give each a separate `--name` to compare them side by side.
+
+The automatic grader is strict and literal. The week 4 LLM judge re-scores the same answers.
 
 ## Layout
 
 ```
 src/research_pilot/
-  agent/react.py      ReAct loop: step limit, forced final answer, refusal handling
+  agent/
+    plan_execute.py   planner -> per-step executor -> synthesizer, with tool budgets
+    react.py          baseline ReAct loop
+    llm.py            shared traced model call and bounded tool loop
+  providers.py        Anthropic backend + OpenAI-compatible backend (Groq, Ollama) with rate-limit retries
   tools/
     __init__.py       tool schemas sent to the model + Toolbox (validation, dispatch, cache)
     search.py         web_search via Tavily
@@ -35,6 +70,10 @@ src/research_pilot/
   tracing.py          per-run JSON trace (LLM calls, tool calls, tokens, latency)
   config.py           settings from env / .env
   cli.py              `rp` command
+bench/
+  tasks.jsonl         15 tasks with reference answers and checks
+  fixtures/           injection test pages
+  run.py              runner + summary;  grade.py: automatic grader
 tests/                offline tests (fake LLM client, mocked HTTP)
 ```
 
@@ -42,9 +81,14 @@ tests/                offline tests (fake LLM client, mocked HTTP)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RP_MODEL` | `claude-opus-5-5` | model the agent runs on |
-| `RP_EFFORT` | `medium` | reasoning effort: low / medium / high / xhigh / max |
-| `RP_MAX_STEPS` | `8` | tool-using turns before the agent is forced to answer |
+| `RP_PROVIDER` | `groq` | groq / ollama / anthropic |
+| `RP_MODEL` | per provider | model the agent runs on |
+| `RP_BASE_URL` | per provider | override the endpoint (any OpenAI-compatible server) |
+| `RP_EFFORT` | `medium` | reasoning effort, anthropic only: low / medium / high / xhigh / max |
+| `RP_MAX_STEPS` | `8` | react agent: tool turns before it is forced to answer |
+| `RP_MAX_PLAN_STEPS` | `6` | plan agent: most steps a plan may have |
+| `RP_MAX_STEP_TURNS` | `4` | plan agent: tool turns per step |
+| `RP_MAX_TOOL_TURNS` | `16` | plan agent: tool turns across the whole run |
 | `RP_MAX_TOKENS` | `16000` | max output tokens per model call |
 
 ## Tests

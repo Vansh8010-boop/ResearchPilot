@@ -1,3 +1,7 @@
-from .react import AgentResult, ReActAgent
+from .base import AgentResult
+from .plan_execute import PlanExecuteAgent
+from .react import ReActAgent
 
-__all__ = ["AgentResult", "ReActAgent"]
+AGENTS = {"plan": PlanExecuteAgent, "react": ReActAgent}
+
+__all__ = ["AGENTS", "AgentResult", "PlanExecuteAgent", "ReActAgent"]

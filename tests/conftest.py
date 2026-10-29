@@ -8,6 +8,7 @@ from research_pilot.config import load_settings
 @pytest.fixture
 def settings(tmp_path):
     return load_settings(
+        provider="anthropic",
         model="claude-opus-5-5",
         max_steps=3,
         tavily_api_key="tvly-test",

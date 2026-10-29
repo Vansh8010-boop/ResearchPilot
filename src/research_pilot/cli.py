@@ -4,14 +4,20 @@ import argparse
 import json
 import sys
 
-from .agent import ReActAgent
-from .config import load_settings
+from .agent import AGENTS
+from .config import PROVIDERS, load_settings
 from .tools import Toolbox
 
 
 def _print_event(kind: str, data: dict) -> None:
-    if kind == "llm" and data["stop_reason"] == "tool_use" and data["text"]:
-        print(f"\n[step {data['step']}] {data['text']}")
+    if kind == "plan":
+        print("Plan:")
+        for i, goal in enumerate(data["plan"], 1):
+            print(f"  {i}. {goal}")
+    elif kind == "finding":
+        print(f"\n[step {data['step']} result] {data['finding'][:400]}")
+    elif kind == "llm" and data["stop_reason"] == "tool_use" and data["text"]:
+        print(f"\n[{data['phase']}] {data['text']}")
     elif kind == "tool":
         status = "ok" if data["ok"] else "ERROR"
         cached = " (cached)" if data["cached"] else ""
@@ -23,6 +29,8 @@ def _print_event(kind: str, data: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rp", description="Ask ResearchPilot a research question.")
     parser.add_argument("question")
+    parser.add_argument("--agent", choices=sorted(AGENTS), default="plan")
+    parser.add_argument("--provider", choices=sorted(PROVIDERS))
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     parser.add_argument("--max-steps", type=int)
@@ -31,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     overrides = {"use_cache": not args.no_cache}
+    if args.provider:
+        overrides["provider"] = args.provider
     if args.model:
         overrides["model"] = args.model
     if args.effort:
@@ -39,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides["max_steps"] = args.max_steps
     settings = load_settings(**overrides)
 
-    agent = ReActAgent(settings, Toolbox(settings), on_event=None if args.quiet else _print_event)
+    agent = AGENTS[args.agent](settings, Toolbox(settings), on_event=None if args.quiet else _print_event)
     result = agent.run(args.question)
 
     print("\n" + "=" * 70)

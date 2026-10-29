@@ -1,5 +1,7 @@
 """Tool registry: JSON schemas sent to the model, and a Toolbox that validates input and dispatches."""
 
+from urllib.parse import urlparse
+
 import httpx
 
 from ..config import Settings
@@ -80,6 +82,8 @@ class Toolbox:
         else:
             result = fetch_page(self.http, str(tool_input["url"]))
 
-        if result.ok:
+        # Local pages (benchmark fixtures) change while we edit them, so never cache them.
+        is_local = name == "fetch_page" and urlparse(str(tool_input["url"])).hostname in ("127.0.0.1", "localhost")
+        if result.ok and not is_local:
             self.cache.set(name, tool_input, result.content)
         return result
