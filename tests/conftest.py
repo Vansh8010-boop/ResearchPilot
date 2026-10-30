@@ -12,6 +12,7 @@ def settings(tmp_path):
         model="claude-opus-5-5",
         max_steps=3,
         defenses=False,  # tests opt in to week 3 defenses explicitly
+        block_private_urls=False,  # tests use mocked HTTP and opt in to the SSRF block explicitly
         tavily_api_key="tvly-test",
         cache_dir=tmp_path / "cache",
         trace_dir=tmp_path / "traces",

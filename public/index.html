@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ResearchPilot</title>
+<meta name="description" content="A plan-and-execute research agent with prompt-injection defenses and a calibrated evaluation harness.">
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --text: #1c1e21; --muted: #62666d; --line: #e2e2de;
+    --accent: #3b4cca; --accent-text: #ffffff; --ok: #1a7f4b; --bad: #c0392b; --warn: #a15c00;
+    --warn-bg: #fdf3e3; --code: #f0f0ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141518; --surface: #1c1e22; --text: #e8e8e6; --muted: #9a9ea6; --line: #2e3136;
+      --accent: #8c9bff; --accent-text: #14151a; --ok: #58c98f; --bad: #f0857a; --warn: #e6b566;
+      --warn-bg: #2c2518; --code: #26282d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.55;
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
+  h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  a { color: var(--accent); overflow-wrap: anywhere; }
+  .tagline { margin: 4px 0 24px; color: var(--muted); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+  .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 14px;
+                 font: inherit; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  select, textarea, input { width: 100%; padding: 10px 12px; font: inherit; color: var(--text);
+                            background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  textarea { resize: vertical; min-height: 84px; }
+  .field { margin-bottom: 14px; }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  button.primary { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px;
+                   padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.primary:disabled { opacity: 0.5; cursor: default; }
+  .note { padding: 12px 14px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line);
+          margin-bottom: 16px; font-size: 15px; }
+  .note.error { border-color: var(--bad); color: var(--bad); }
+  .note.warn { background: var(--warn-bg); border-color: var(--warn); }
+  .question { font-size: 18px; font-weight: 600; margin: 20px 0 2px; overflow-wrap: anywhere; }
+  .meta { font-size: 14px; color: var(--muted); margin-bottom: 16px; }
+  .result { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; align-items: start; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  .card + .card { margin-top: 16px; }
+  .answer p { margin: 0 0 10px; overflow-wrap: anywhere; }
+  .answer ul { margin: 0 0 10px; padding-left: 20px; }
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 16px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  ol.plan { margin: 0; padding-left: 20px; font-size: 15px; }
+  .step { padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; overflow-wrap: anywhere; }
+  .step:first-child { border-top: 0; }
+  .step code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .tag { font-weight: 700; margin-left: 4px; }
+  .tag.ok { color: var(--ok); } .tag.bad { color: var(--bad); } .tag.blocked { color: var(--warn); }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  details summary { cursor: pointer; }
+  [hidden] { display: none !important; }
+  @media (max-width: 760px) {
+    .result, .row { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>ResearchPilot</h1>
+  <p class="tagline">A plan-and-execute research agent with prompt-injection defenses.
+    <a href="https://github.com/Vansh8010-boop/ResearchPilot">Source on GitHub</a></p>
+
+  <div class="tabs" role="tablist">
+    <button id="tab-recorded" role="tab" aria-selected="true" aria-controls="panel-recorded">Recorded runs</button>
+    <button id="tab-live" role="tab" aria-selected="false" aria-controls="panel-live">Ask a question</button>
+  </div>
+
+  <section id="panel-recorded" role="tabpanel">
+    <div class="field">
+      <label for="run-select">Real runs from the benchmark, replayed from their traces</label>
+      <select id="run-select"></select>
+    </div>
+    <div id="run-description" class="note"></div>
+    <div id="recorded-output"></div>
+  </section>
+
+  <section id="panel-live" role="tabpanel" hidden>
+    <div id="live-status" class="note">Checking the live agent…</div>
+    <form id="live-form" hidden>
+      <div class="field">
+        <label for="question">Research question</label>
+        <textarea id="question" required minlength="3" maxlength="2000"
+                  placeholder="e.g. How many times larger is Canada than the UK by area?"></textarea>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label for="agent">Agent</label>
+          <select id="agent"><option value="plan">Plan and execute</option><option value="react">ReAct loop</option></select>
+        </div>
+        <div class="field">
+          <label for="prompts">Prompt version</label>
+          <select id="prompts"><option value="v1">v1</option><option value="v2">v2</option></select>
+        </div>
+      </div>
+      <button class="primary" id="run" type="submit">Research</button>
+    </form>
+    <div id="live-output"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const URL_RE = /https?:\/\/[^\s<>"'`)\]】]+/g;
+const ICONS = { web_search: "🔎", fetch_page: "📄", calculator: "🧮" };
+
+// All text here comes from models or web pages, so it is only ever added as text nodes.
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function trimUrl(url) { return url.replace(/[.,;:!?]+$/, ""); }
+
+function safeLink(url) {
+  const a = el("a", "", url);
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return document.createTextNode(url);
+  } catch { return document.createTextNode(url); }
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer nofollow";
+  return a;
+}
+
+function addInline(parent, text) {
+  const pattern = /(\*\*[^*]+\*\*|https?:\/\/[^\s<>"'`)\]】]+)/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    parent.append(text.slice(last, match.index));
+    const token = match[0];
+    if (token.startsWith("**")) {
+      parent.append(el("strong", "", token.slice(2, -2)));
+      last = match.index + token.length;
+    } else {
+      const url = trimUrl(token);
+      parent.append(safeLink(url));
+      last = match.index + url.length;
+    }
+  }
+  parent.append(text.slice(last));
+}
+
+function renderRich(text) {
+  const root = el("div", "answer");
+  let list = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) { list = null; continue; }
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    if (bullet) {
+      if (!list) { list = el("ul"); root.append(list); }
+      const li = el("li");
+      addInline(li, bullet[1]);
+      list.append(li);
+    } else {
+      list = null;
+      const p = el("p");
+      addInline(p, line.replace(/^#+\s*/, ""));
+      root.append(p);
+    }
+  }
+  return root;
+}
+
+function sourcesIn(answer) {
+  return [...new Set((answer.match(URL_RE) || []).map(trimUrl))];
+}
+
+function renderStep(event) {
+  const row = el("div", "step");
+  if (event.type === "tool") {
+    const value = Object.values(event.input || {})[0];
+    row.append(`${ICONS[event.name] || "🛠️"} `, el("code", "", event.name), ` ${value ?? ""} `);
+    const [cls, label] = event.blocked ? ["blocked", "blocked"] : event.ok ? ["ok", "ok"] : ["bad", "failed"];
+    row.append(el("span", `tag ${cls}`, label));
+    if (event.cached) row.append(el("span", "sub", " · cached"));
+    if (!event.ok) row.append(el("div", "sub", event.output));
+  } else if (event.type === "finding") {
+    const details = el("details");
+    details.append(el("summary", "", `Step ${event.step} result`));
+    details.append(renderRich(event.finding));
+    row.append(details);
+  } else if (event.type === "thought") {
+    row.append(el("div", "sub", event.text));
+  }
+  return row;
+}
+
+function renderStats(stats) {
+  const tiles = [
+    ["Model calls", stats.steps ?? 0],
+    ["Tool calls ok", `${stats.tool_calls_ok ?? 0}/${stats.tool_calls ?? 0}`],
+    ["Blocked", stats.tool_calls_blocked ?? 0],
+    ["Tokens", ((stats.input_tokens ?? 0) + (stats.output_tokens ?? 0)).toLocaleString()],
+    ["Time", `${Math.round(stats.wall_time_s ?? 0)}s`],
+  ];
+  const grid = el("div", "stats");
+  for (const [label, value] of tiles) {
+    const tile = el("div", "stat");
+    tile.append(el("b", "", String(value)), el("span", "", label));
+    grid.append(tile);
+  }
+  return grid;
+}
+
+function renderRun(target, run) {
+  target.replaceChildren();
+  target.append(el("div", "question", run.question));
+  target.append(el("div", "meta",
+    `${run.agent === "react" ? "ReAct loop" : "Plan and execute"} · defenses ${run.defenses ? "on" : "off"} · prompts ${run.prompts}`));
+  if (run.notice) target.append(el("div", `note ${run.notice.kind}`, run.notice.text));
+
+  const left = el("div"), right = el("div"), result = el("div", "result");
+  const answerCard = el("div", "card");
+  answerCard.append(el("h2", "", "Answer"));
+  answerCard.append(run.answer ? renderRich(run.answer) : el("div", "sub", run.running ? "Working…" : "No answer."));
+  left.append(answerCard);
+
+  const sources = run.answer ? sourcesIn(run.answer) : [];
+  if (sources.length) {
+    const card = el("div", "card"), list = el("ul");
+    card.append(el("h2", "", "Sources"));
+    for (const url of sources) { const li = el("li"); li.append(safeLink(url)); list.append(li); }
+    card.append(list);
+    left.append(card);
+  }
+  if (run.stats) left.append(renderStats(run.stats));
+
+  if (run.plan.length) {
+    const card = el("div", "card"), list = el("ol", "plan");
+    card.append(el("h2", "", "Plan"));
+    for (const goal of run.plan) list.append(el("li", "", goal));
+    card.append(list);
+    right.append(card);
+  }
+  const steps = el("div", "card");
+  steps.append(el("h2", "", "Steps"));
+  if (!run.events.length) steps.append(el("div", "sub", run.running ? "Waiting for the first step…" : "No tool calls."));
+  for (const event of run.events) if (event.type !== "plan") steps.append(renderStep(event));
+  right.append(steps);
+
+  result.append(left, right);
+  target.append(result);
+}
+
+// --- recorded runs: rebuild the live view from a saved trace ---
+function traceToRun(trace) {
+  const events = [], findings = trace.findings || [], plan = trace.plan || [];
+  let phase = null;
+  const closeStep = () => {
+    if (!phase || !phase.startsWith("step")) return;
+    const index = Number(phase.slice(4));
+    if (index <= findings.length) events.push({ type: "finding", step: index, goal: plan[index - 1] || "", finding: findings[index - 1] });
+  };
+  for (const e of trace.events || []) {
+    if (e.phase !== phase) { closeStep(); phase = e.phase; }
+    if (e.type === "tool_call") {
+      events.push({ type: "tool", name: e.name, input: e.input, ok: e.ok, blocked: !!e.blocked, cached: !!e.cached,
+                    output: (e.output_preview || "").slice(0, 300) });
+    } else if (e.stop_reason === "tool_use" && e.text) {
+      events.push({ type: "thought", text: e.text.slice(0, 500) });
+    }
+  }
+  closeStep();
+  return { question: trace.question, agent: trace.agent || "plan", defenses: !!trace.defenses,
+           prompts: trace.prompts || "v1", plan, events, answer: trace.result.answer, stats: trace.result };
+}
+
+async function showRecorded(entry) {
+  $("run-description").textContent = entry.description;
+  const output = $("recorded-output");
+  try {
+    const response = await fetch(`demo/${entry.file}`);
+    if (!response.ok) throw new Error(response.status);
+    renderRun(output, traceToRun(await response.json()));
+  } catch {
+    output.replaceChildren(el("div", "note error", "This recording couldn't be loaded."));
+  }
+}
+
+async function loadRecorded() {
+  try {
+    const response = await fetch("demo/index.json");
+    if (!response.ok) throw new Error(response.status);
+    const runs = await response.json();
+    for (const [i, run] of runs.entries()) {
+      const option = el("option", "", run.title);
+      option.value = i;
+      $("run-select").append(option);
+    }
+    $("run-select").addEventListener("change", (e) => showRecorded(runs[e.target.value]));
+    showRecorded(runs[0]);
+  } catch {
+    $("run-description").textContent = "Recorded runs couldn't be loaded.";
+  }
+}
+
+// --- live questions: read the newline-delimited JSON stream ---
+async function* readLines(response) {
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+    for (const line of lines) if (line.trim()) yield JSON.parse(line);
+  }
+}
+
+async function runLive(event) {
+  event.preventDefault();
+  const output = $("live-output");
+  const run = { question: $("question").value.trim(), agent: $("agent").value, defenses: true,
+                prompts: $("prompts").value, plan: [], events: [], answer: null, stats: null, running: true };
+  $("run").disabled = true;
+  renderRun(output, run);
+  let finished = false;
+  try {
+    const response = await fetch("api/research", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${$("password").value}` },
+      body: JSON.stringify({ question: run.question, agent: run.agent, prompts: run.prompts }),
+    });
+    if (!response.ok) {
+      const messages = { 401: "Wrong password.", 422: "That question is too short or too long.",
+                         503: "Live questions aren't set up on this deployment." };
+      throw new Error(messages[response.status] || `The server returned ${response.status}.`);
+    }
+    for await (const item of readLines(response)) {
+      if (item.type === "ping") continue;
+      if (item.type === "plan") run.plan = item.plan;
+      else if (item.type === "final") { run.answer = item.answer; run.stats = item.stats; finished = true; }
+      else if (item.type === "error") { run.notice = { kind: "error", text: item.message }; finished = true; }
+      else run.events.push(item);
+      renderRun(output, run);
+    }
+    if (!finished) run.notice = { kind: "error", text: "The connection ended before the agent finished." };
+  } catch (error) {
+    run.notice = { kind: "error", text: error.message || "The request failed." };
+  }
+  run.running = false;
+  renderRun(output, run);
+  $("run").disabled = false;
+}
+
+async function loadLiveStatus() {
+  const status = $("live-status");
+  try {
+    const response = await fetch("api/health");
+    if (!response.ok) throw new Error(response.status);
+    const health = await response.json();
+    if (!health.live) {
+      status.textContent = "Live questions aren't enabled on this deployment. Recorded runs still work.";
+      return;
+    }
+    status.textContent = `Live agent on ${health.provider} ${health.model}. Defenses are always on. Questions need a password.`;
+    $("live-form").hidden = false;
+  } catch {
+    status.textContent = "The live agent isn't reachable right now. Recorded runs still work.";
+  }
+}
+
+function selectTab(name) {
+  for (const key of ["recorded", "live"]) {
+    $(`tab-${key}`).setAttribute("aria-selected", String(key === name));
+    $(`panel-${key}`).hidden = key !== name;
+  }
+}
+
+$("tab-recorded").addEventListener("click", () => selectTab("recorded"));
+$("tab-live").addEventListener("click", () => selectTab("live"));
+$("live-form").addEventListener("submit", runLive);
+loadRecorded();
+loadLiveStatus();
+</script>
+</body>
+</html>

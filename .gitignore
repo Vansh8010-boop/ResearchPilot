@@ -7,3 +7,4 @@ traces/
 .pytest_cache/
 bench/results/*/traces/
 bench/results/*.log
+.vercel/

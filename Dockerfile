@@ -17,6 +17,7 @@ RUN uv sync --frozen --no-dev --extra api --extra ui --no-install-project
 
 COPY src ./src
 COPY ui ./ui
+COPY public ./public
 RUN uv sync --frozen --no-dev --extra api --extra ui
 
 RUN useradd --create-home app && mkdir -p /data && chown app /data

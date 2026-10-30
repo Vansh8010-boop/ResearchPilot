@@ -18,7 +18,7 @@ services:
     command: ["streamlit", "run", "ui/app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
     environment:
       RP_API_URL: http://api:8000
-      RP_API_TOKEN: ${RP_API_TOKEN:-}
+      RP_UI_API_TOKEN: ${RP_API_TOKEN:-}  # private deployment: the UI is trusted with the API token
     ports:
       - "8501:8501"
     depends_on:

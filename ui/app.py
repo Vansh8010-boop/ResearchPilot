@@ -1,32 +1,37 @@
-"""Streamlit front end for the ResearchPilot API.
+"""Streamlit front end for ResearchPilot.
 
     uv run streamlit run ui/app.py
 
-Talks only to the HTTP API (RP_API_URL, default http://localhost:8000), so it needs no model keys.
+Two modes:
+- Recorded runs: replays real benchmark traces from public/demo/ (RP_DEMO_DIR). Costs nothing and works
+  even when the API is down or password-protected.
+- Ask a question: submits to the HTTP API (RP_API_URL, default http://localhost:8000). If the API
+  requires a token, visitors type it as a password unless RP_UI_API_TOKEN is set for a private
+  deployment. The UI deliberately does not read RP_API_TOKEN: in a single-container deployment the
+  API's token is in the same environment, and reading it would let every visitor skip the password.
 """
 
+import json
 import os
 import re
 import time
+from pathlib import Path
 
 import httpx
 import streamlit as st
 
 API_URL = os.getenv("RP_API_URL", "http://localhost:8000").rstrip("/")
-API_TOKEN = os.getenv("RP_API_TOKEN") or None
+UI_TOKEN = os.getenv("RP_UI_API_TOKEN") or None
+DEMO_DIR = Path(os.getenv("RP_DEMO_DIR", Path(__file__).resolve().parents[1] / "public" / "demo"))
 POLL_SECONDS = 1.5
+OUTPUT_PREVIEW = 300
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'`\)\]】]+")
 TOOL_ICONS = {"web_search": "🔎", "fetch_page": "📄", "calculator": "🧮"}
 
 st.set_page_config(page_title="ResearchPilot", page_icon="🔎", layout="wide")
 
 
-def api(method: str, path: str, **kwargs):
-    headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
-    response = httpx.request(method, f"{API_URL}{path}", headers=headers, timeout=15.0, **kwargs)
-    response.raise_for_status()
-    return response.json()
-
+# --- shared rendering -----------------------------------------------------------------------------
 
 def sources_in(answer: str) -> list[str]:
     seen = []
@@ -91,47 +96,133 @@ def render_job(job: dict, events: list[dict]) -> None:
             cols[4].metric("Time", f"{s.get('wall_time_s') or 0:.0f}s")
 
 
-with st.sidebar:
-    st.title("ResearchPilot")
+# --- recorded runs --------------------------------------------------------------------------------
+
+def trace_to_job(trace: dict) -> tuple[dict, list[dict]]:
+    """Rebuild the live view (plan, tool calls, step findings, answer) from a saved trace."""
+    events: list[dict] = []
+    findings = trace.get("findings") or []
+    current_step = None
+
+    def close_step():
+        if current_step and current_step.startswith("step"):
+            index = int(current_step[4:])
+            if index <= len(findings):
+                goal = trace["plan"][index - 1] if index <= len(trace.get("plan", [])) else ""
+                events.append({"type": "finding", "step": index, "goal": goal, "finding": findings[index - 1]})
+
+    for e in trace.get("events", []):
+        if e.get("phase") != current_step:
+            close_step()
+            current_step = e.get("phase")
+        if e["type"] == "tool_call":
+            events.append({"type": "tool", "phase": e["phase"], "name": e["name"], "input": e["input"],
+                           "ok": e["ok"], "blocked": e.get("blocked", False), "cached": e.get("cached", False),
+                           "output": e["output_preview"][:OUTPUT_PREVIEW]})
+        elif e["stop_reason"] == "tool_use" and e.get("text"):
+            events.append({"type": "thought", "phase": e["phase"], "text": e["text"][:500]})
+    close_step()
+
+    result = trace["result"]
+    job = {
+        "question": trace["question"], "agent": trace.get("agent", "plan"), "defenses": trace.get("defenses", False),
+        "prompts": trace.get("prompts", "v1"), "status": "done", "plan": trace.get("plan", []),
+        "answer": result["answer"], "error": None,
+        "stats": {k: result.get(k) for k in ("steps", "input_tokens", "output_tokens", "tool_calls", "tool_calls_ok",
+                                             "tool_calls_blocked", "wall_time_s")},
+    }
+    return job, events
+
+
+def recorded_runs() -> None:
+    index_path = DEMO_DIR / "index.json"
+    if not index_path.exists():
+        st.warning(f"No recorded runs found in {DEMO_DIR}.")
+        return
+    runs = json.loads(index_path.read_text(encoding="utf-8"))
+    st.markdown("Real runs from the benchmark, replayed from their traces. Pick one to see what the agent did "
+                "step by step.")
+    choice = st.selectbox("Recorded run", range(len(runs)), format_func=lambda i: runs[i]["title"])
+    run = runs[choice]
+    st.info(run["description"])
+    trace = json.loads((DEMO_DIR / run["file"]).read_text(encoding="utf-8"))
+    job, events = trace_to_job(trace)
+    render_job(job, events)
+
+
+# --- live questions -------------------------------------------------------------------------------
+
+def api(method: str, path: str, token: str | None = None, **kwargs):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    response = httpx.request(method, f"{API_URL}{path}", headers=headers, timeout=15.0, **kwargs)
+    response.raise_for_status()
+    return response.json()
+
+
+def live_questions() -> None:
     try:
         health = api("GET", "/health")
-        st.success(f"API connected · {health['provider']} `{health['model']}`")
     except httpx.HTTPError as exc:
-        st.error(f"Can't reach the API at {API_URL}: {exc}")
-        st.stop()
-    agent = st.radio("Agent", ["plan", "react"], horizontal=True,
-                     help="plan: planner, per-step executor, writer. react: one think-act loop.")
-    defenses = st.toggle("Injection defenses", value=True,
-                         help="Untrusted-content wrapping, URL provenance, link sanitizing, retries, loop limits.")
-    prompts = st.selectbox("Prompt version", ["v1", "v2"],
-                           index=["v1", "v2"].index(health.get("default_prompts", "v1")),
-                           disabled=agent != "plan", help="Only the plan agent has prompt versions.")
+        st.error(f"The live agent isn't reachable right now ({exc}). Recorded runs still work.")
+        return
+
+    token = UI_TOKEN
+    with st.sidebar:
+        st.success(f"Live agent · {health['provider']} `{health['model']}`")
+        if health.get("remaining_today") is not None:
+            st.caption(f"{health['remaining_today']} of {health['daily_limit']} questions left today (UTC)")
+        if health["auth"] and not token:
+            token = st.text_input("Password", type="password", help="Live questions need a password.") or None
+        agent = st.radio("Agent", ["plan", "react"], horizontal=True,
+                         help="plan: planner, per-step executor, writer. react: one think-act loop.")
+        defenses = st.toggle("Injection defenses", value=True,
+                             help="Untrusted-content wrapping, URL provenance, link sanitizing, retries, loop limits.")
+        prompts = st.selectbox("Prompt version", ["v1", "v2"],
+                               index=["v1", "v2"].index(health.get("default_prompts", "v1")),
+                               disabled=agent != "plan", help="Only the plan agent has prompt versions.")
+
+    if health["auth"] and not token:
+        st.info("Enter the password in the sidebar to ask live questions, or switch to Recorded runs.")
+        return
+
+    question = st.text_area("Research question", height=90,
+                            placeholder="e.g. How many times larger is Canada than the UK by area?")
+    if st.button("Research", type="primary", disabled=len(question.strip()) < 3):
+        try:
+            created = api("POST", "/research", token, json={"question": question, "agent": agent,
+                                                            "defenses": defenses,
+                                                            "prompts": prompts if agent == "plan" else None})
+            st.session_state.job_id, st.session_state.events = created["id"], []
+        except httpx.HTTPStatusError as exc:
+            message = {401: "Wrong password.", 429: exc.response.json().get("detail", "Too many requests.")}
+            st.error(message.get(exc.response.status_code, f"Couldn't start the job: {exc.response.text}"))
+
+    if job_id := st.session_state.get("job_id"):
+        events: list[dict] = st.session_state.setdefault("events", [])
+        placeholder = st.empty()
+        while True:
+            try:
+                job = api("GET", f"/research/{job_id}", token, params={"since": len(events)})
+            except httpx.HTTPStatusError:
+                st.session_state.pop("job_id")  # e.g. the server restarted and forgot the job
+                break
+            events.extend(job["events"])
+            with placeholder.container():
+                render_job(job, events)
+            if job["status"] in ("done", "failed"):
+                break
+            time.sleep(POLL_SECONDS)
+
+
+with st.sidebar:
+    st.title("ResearchPilot")
+    st.caption("A plan-and-execute research agent with prompt-injection defenses. "
+               "[Source on GitHub](https://github.com/Vansh8010-boop/ResearchPilot)")
+    mode = st.radio("Mode", ["Recorded runs", "Ask a question"],
+                    help="Recorded runs replay real benchmark traces and cost nothing.")
     st.divider()
-    st.markdown("**Recent questions**")
-    for item in api("GET", "/research", params={"limit": 8}):
-        if st.button(f"{item['question'][:48]} ({item['status']})", key=item["id"], use_container_width=True):
-            st.session_state.job_id = item["id"]
-            st.session_state.events = []
 
-question = st.text_area("Research question", placeholder="e.g. How many times larger is Canada than the UK by area?",
-                        height=90)
-if st.button("Research", type="primary", disabled=len(question.strip()) < 3):
-    try:
-        created = api("POST", "/research", json={"question": question, "agent": agent, "defenses": defenses,
-                                                 "prompts": prompts if agent == "plan" else None})
-        st.session_state.job_id = created["id"]
-        st.session_state.events = []
-    except httpx.HTTPStatusError as exc:
-        st.error(f"Couldn't start the job: {exc.response.text}")
-
-if job_id := st.session_state.get("job_id"):
-    events: list[dict] = st.session_state.setdefault("events", [])
-    placeholder = st.empty()
-    while True:
-        job = api("GET", f"/research/{job_id}", params={"since": len(events)})
-        events.extend(job["events"])
-        with placeholder.container():
-            render_job(job, events)
-        if job["status"] in ("done", "failed"):
-            break
-        time.sleep(POLL_SECONDS)
+if mode == "Recorded runs":
+    recorded_runs()
+else:
+    live_questions()

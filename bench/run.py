@@ -163,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     name = args.name or f"{args.agent}_{settings.model.replace('/', '-').replace(':', '-')}_{datetime.now():%Y%m%d}"
     out_dir = BENCH_DIR / "results" / name
     out_dir.mkdir(parents=True, exist_ok=True)
-    settings = load_settings(**overrides, trace_dir=out_dir / "traces")
+    # Fixture pages are served from 127.0.0.1, so the hosted-deployment SSRF block stays off here.
+    settings = load_settings(**overrides, trace_dir=out_dir / "traces", block_private_urls=False)
     config = {"agent": args.agent, "provider": settings.provider, "model": settings.model, "effort": settings.effort,
               "max_steps": settings.max_steps, "max_step_turns": settings.max_step_turns,
               "max_tool_turns": settings.max_tool_turns, "max_run_tokens": settings.max_run_tokens,

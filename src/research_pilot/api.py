@@ -8,7 +8,8 @@
     GET  /health              provider, model, defaults
 
 Jobs run one at a time on a single worker thread: free-tier rate limits and a laptop's memory both
-favour sequential runs. Set RP_API_TOKEN to require "Authorization: Bearer <token>".
+favour sequential runs. Set RP_API_TOKEN to require "Authorization: Bearer <token>", and
+RP_DAILY_LIMIT to cap how many questions are accepted per UTC day (for public deployments).
 """
 
 import json
@@ -17,6 +18,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -94,22 +96,41 @@ class Job:
         }
 
 
+def utc_day() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 class JobStore:
-    def __init__(self, settings: Settings, agent_factory: AgentFactory):
+    def __init__(self, settings: Settings, agent_factory: AgentFactory, daily_limit: int | None = None,
+                 today: Callable[[], str] = utc_day):
         self.settings = settings
         self.agent_factory = agent_factory
+        self.daily_limit = daily_limit
+        self.today = today
+        self.day, self.accepted_today = today(), 0
         self.jobs: OrderedDict[str, Job] = OrderedDict()
         self.lock = threading.Lock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="research")
 
+    def remaining_today(self) -> int | None:
+        if self.daily_limit is None:
+            return None
+        if self.today() != self.day:
+            self.day, self.accepted_today = self.today(), 0
+        return max(0, self.daily_limit - self.accepted_today)
+
     def submit(self, request: ResearchRequest) -> Job:
         with self.lock:
+            if self.remaining_today() == 0:
+                raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                                    f"the daily limit of {self.daily_limit} questions is used up; try again tomorrow (UTC)")
             queued = sum(1 for j in self.jobs.values() if j.status in ("queued", "running"))
             if queued >= MAX_QUEUED:
                 raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"{queued} jobs already waiting; try later")
             job = Job(id=uuid.uuid4().hex[:12], question=request.question.strip(), agent=request.agent,
                       defenses=request.defenses, prompts=request.prompts or self.settings.prompt_version)
             self.jobs[job.id] = job
+            self.accepted_today += 1
             while len(self.jobs) > MAX_KEPT_JOBS:
                 oldest = next(iter(self.jobs))
                 if self.jobs[oldest].status in ("queued", "running"):
@@ -146,10 +167,12 @@ class JobStore:
 
 
 def create_app(settings: Settings | None = None, agent_factory: AgentFactory = default_agent_factory,
-               api_token: str | None = None) -> FastAPI:
+               api_token: str | None = None, daily_limit: int | None = None) -> FastAPI:
     settings = settings or load_settings()
     api_token = api_token if api_token is not None else os.getenv("RP_API_TOKEN") or None
-    store = JobStore(settings, agent_factory)
+    if daily_limit is None and os.getenv("RP_DAILY_LIMIT"):
+        daily_limit = int(os.environ["RP_DAILY_LIMIT"])
+    store = JobStore(settings, agent_factory, daily_limit)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -166,7 +189,8 @@ def create_app(settings: Settings | None = None, agent_factory: AgentFactory = d
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok", "version": __version__, "provider": settings.provider, "model": settings.model,
-                "default_prompts": settings.prompt_version, "auth": bool(api_token)}
+                "default_prompts": settings.prompt_version, "auth": bool(api_token),
+                "daily_limit": store.daily_limit, "remaining_today": store.remaining_today()}
 
     @app.post("/research", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_token)])
     def submit(request: ResearchRequest) -> dict:

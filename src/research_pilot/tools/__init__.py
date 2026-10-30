@@ -1,7 +1,9 @@
 """Tool registry: JSON schemas sent to the model, and a Toolbox that validates input and dispatches."""
 
 import json
+import socket
 import time
+from functools import partial
 from urllib.parse import urlparse
 
 import httpx
@@ -12,7 +14,7 @@ from .cache import DiskCache
 from .calculator import calculator
 from .fetch import fetch_page
 from .search import web_search
-from .security import Provenance, wrap_untrusted
+from .security import Provenance, private_address_reason, wrap_untrusted
 
 TOOL_SCHEMAS = [
     {
@@ -64,11 +66,13 @@ RETRY_DELAYS_S = (1.0, 3.0)
 
 
 class Toolbox:
-    def __init__(self, settings: Settings, http: httpx.Client | None = None, sleep=time.sleep):
+    def __init__(self, settings: Settings, http: httpx.Client | None = None, sleep=time.sleep,
+                 resolve=socket.getaddrinfo):
         self.settings = settings
         self.http = http or httpx.Client()
         self.cache = DiskCache(settings.cache_dir, enabled=settings.use_cache)
         self.sleep = sleep
+        self.resolve = resolve
         self.provenance = Provenance()
 
     def start_run(self, question: str) -> None:
@@ -116,7 +120,9 @@ class Toolbox:
                 result = web_search(self.http, self.settings.tavily_api_key, str(tool_input["query"]),
                                     tool_input.get("k", 5))
             else:
-                result = fetch_page(self.http, str(tool_input["url"]))
+                guard = (partial(private_address_reason, resolve=self.resolve)
+                         if self.settings.block_private_urls else None)
+                result = fetch_page(self.http, str(tool_input["url"]), guard)
             if result.ok or not result.retryable or delay is None:
                 break
             self.sleep(delay)

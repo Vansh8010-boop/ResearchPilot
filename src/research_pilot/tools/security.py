@@ -11,7 +11,9 @@
    can't smuggle a tracking image or phishing link into the answer.
 """
 
+import ipaddress
 import re
+import socket
 from urllib.parse import urlparse, urlunparse
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'`\)\]】]+")
@@ -121,3 +123,35 @@ def sanitize_links(text: str, provenance: Provenance) -> tuple[str, list[str]]:
 
     text = MARKDOWN_IMAGE.sub(drop_image, text)
     return URL_PATTERN.sub(drop_url, text), removed
+
+
+def _is_internal(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved
+            or address.is_multicast or address.is_unspecified)
+
+
+def private_address_reason(url: str, resolve=socket.getaddrinfo) -> str | None:
+    """SSRF guard for hosted deployments: refuse URLs whose host is, or resolves to, a private,
+    loopback, link-local (e.g. cloud metadata at 169.254.169.254), reserved or multicast address.
+
+    Known limit: the address is resolved here and again when the request is made, so a DNS record
+    that changes in between (DNS rebinding) is not caught.
+    """
+    host = urlparse(url).hostname
+    if not host:
+        return f"blocked: '{url}' has no host"
+    try:
+        addresses = {ipaddress.ip_address(host)}
+    except ValueError:
+        try:
+            infos = resolve(host, None)
+        except (socket.gaierror, UnicodeError):
+            return None  # unresolvable: let the fetch fail with a normal error
+        addresses = {ipaddress.ip_address(info[4][0].split("%")[0]) for info in infos}
+    for address in addresses:
+        if _is_internal(address):
+            return (f"blocked: {host} points to a private or internal address ({address}). "
+                    "ResearchPilot only reads public web pages.")
+    return None

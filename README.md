@@ -68,17 +68,28 @@ The API runs each question as a background job, one at a time (free-tier rate li
 | `GET /research` | recent jobs |
 | `GET /health` | provider, model, defaults |
 
-Defenses are on by default for API requests. Set `RP_API_TOKEN` to require `Authorization: Bearer <token>`. The UI talks only to the API and needs no model keys. It shows the plan, each tool call (✓, ✗ or ⛔ blocked) and each step's finding as they happen, then the answer, its sources and run stats.
+Defenses are on by default for API requests. Set `RP_API_TOKEN` to require `Authorization: Bearer <token>`, and `RP_DAILY_LIMIT` to cap questions per UTC day. The UI talks only to the API and needs no model keys. It has two modes:
 
-### Docker
+- **Recorded runs** replay real benchmark traces from `public/demo/` (exported with `python -m bench.export_demo`). They cost nothing and work without the API.
+- **Ask a question** shows the plan, each tool call (✓, ✗ or ⛔ blocked) and each step's finding as they happen, then the answer, its sources and run stats. If the API needs a token, visitors type it as a password. The UI reads its own token only from `RP_UI_API_TOKEN`, so a shared environment can't leak the API's token to visitors.
 
-CI builds this image and smoke-tests both containers on every push to `main`.
+### Hosting safeguards
+
+| Risk | Safeguard |
+|---|---|
+| Visitors make the server fetch internal addresses (SSRF), e.g. cloud metadata at `169.254.169.254` | `RP_BLOCK_PRIVATE_URLS` (on by default, off only in the benchmark runner) refuses hosts that are or resolve to private, loopback, link-local, reserved or multicast addresses, and checks every redirect hop. DNS rebinding between the check and the request is not covered. |
+| Visitors use up the free model and search quotas | A password (`RP_API_TOKEN`) for live questions, and the hosted site runs on `openai/gpt-oss-20b`, which has its own Groq daily allowance, so the benchmark's `gpt-oss-120b` allowance is untouched. `RP_DAILY_LIMIT` applies to the job-queue API only: serverless instances share no memory, so on Vercel the ceiling is Groq's own daily limit. |
+| Prompt injection from pages the agent reads | Week 3 defenses are always on for the public site |
+
+### Vercel
+
+The public site runs on Vercel's free plan. `public/index.html` is a static page on the CDN, and `app.py` is one Python function, so there are no background jobs: each live question is one `POST /api/research` that streams progress as newline-delimited JSON, stopping cleanly at 280 seconds, before the platform's 300-second limit. `src/research_pilot/web.py` holds this API; `src/research_pilot/api.py` remains the job-queue API used with Streamlit and Docker.
+
+Live questions need `GROQ_API_KEY`, `TAVILY_API_KEY` and `RP_API_TOKEN` (the visitor password) set as Vercel environment variables. If any is missing they stay off and recorded runs still work. A request can't turn defenses or the SSRF block off. To try it locally:
 
 ```bash
-docker compose up --build      # API on :8000, UI on :8501
+uv run uvicorn dev_web:app --port 8090
 ```
-
-One image serves both containers. Only the API container reads `.env`, and the tool cache and traces live on a named volume. To use Ollama on the host from inside Docker, set `RP_BASE_URL=http://host.docker.internal:11434/v1`.
 
 ## Benchmark
 
@@ -155,8 +166,11 @@ src/research_pilot/
   config.py           settings from env / .env
   cli.py              `rp` command
   api.py              FastAPI job service
+  web.py              streaming API for serverless hosting
 ui/app.py             Streamlit front end
 Dockerfile, docker-compose.yml
+app.py, vercel.json   Vercel entrypoint and function settings
+public/               static site and the recorded runs it replays
 bench/
   tasks.jsonl         15 tasks with reference answers and checks
   injection_tasks.jsonl  6 prompt-injection attacks
@@ -181,6 +195,8 @@ tests/                offline tests (fake LLM client, mocked HTTP)
 | `RP_MAX_TOOL_TURNS` | `16` | plan agent: tool turns across the whole run |
 | `RP_MAX_TOKENS` | `16000` | max output tokens per model call |
 | `RP_DEFENSES` | `on` | week 3 hardening on/off |
+| `RP_BLOCK_PRIVATE_URLS` | `on` | refuse fetches to private/internal addresses (the benchmark runner turns it off for its local fixtures) |
+| `RP_DAILY_LIMIT` | none | API: questions accepted per UTC day |
 | `RP_PROMPTS` | `v1` | plan agent prompt version: v1 (baseline) / v2 (groups facts by source) |
 | `RP_MAX_RUN_TOKENS` | `60000` | with defenses on: token budget per run before the agent must answer |
 

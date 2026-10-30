@@ -1,6 +1,7 @@
 """fetch_page tool: download a URL and return its main readable text."""
 
-from urllib.parse import urlparse
+from typing import Callable
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import trafilatura
@@ -8,6 +9,7 @@ import trafilatura
 from .base import ToolResult, error
 
 MAX_CHARS = 8000
+MAX_REDIRECTS = 5
 MAX_BYTES = 3_000_000
 TEXT_TYPES = ("text/html", "text/plain", "application/xhtml+xml")
 USER_AGENT = "Mozilla/5.0 (compatible; ResearchPilot/0.1; +https://github.com/)"
@@ -25,12 +27,27 @@ def truncate(text: str, limit: int = MAX_CHARS) -> str:
     return text[:limit] + f"\n\n[truncated: showing {limit} of {len(text)} characters]"
 
 
-def fetch_page(http: httpx.Client, url: str) -> ToolResult:
+def fetch_page(http: httpx.Client, url: str, guard: Callable[[str], str | None] | None = None) -> ToolResult:
+    """`guard(url)` returns a reason to refuse a URL (e.g. it points at a private address). With a
+    guard, redirects are followed one hop at a time so every hop is checked, not just the first."""
     if urlparse(url).scheme not in ("http", "https"):
         return error(f"only http(s) URLs are supported, got '{url}'")
 
     try:
-        response = http.get(url, headers={"User-Agent": USER_AGENT}, timeout=15.0, follow_redirects=True)
+        if guard is None:
+            response = http.get(url, headers={"User-Agent": USER_AGENT}, timeout=15.0, follow_redirects=True)
+        else:
+            current = url
+            for _ in range(MAX_REDIRECTS + 1):
+                reason = guard(current)
+                if reason:
+                    return ToolResult(ok=False, content=reason, blocked=True)
+                response = http.get(current, headers={"User-Agent": USER_AGENT}, timeout=15.0, follow_redirects=False)
+                if not (response.is_redirect and "location" in response.headers):
+                    break
+                current = urljoin(current, response.headers["location"])
+            else:
+                return error(f"too many redirects from {url}")
     except httpx.TimeoutException:
         return error(f"fetch timed out: {url}; try another source", retryable=True)
     except httpx.HTTPError as exc:

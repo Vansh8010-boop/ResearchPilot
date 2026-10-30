@@ -29,6 +29,7 @@ class Settings:
     max_run_tokens: int
     defenses: bool
     prompt_version: str
+    block_private_urls: bool
     base_url: str | None
     api_key: str | None
     tavily_api_key: str | None
@@ -56,6 +57,7 @@ def load_settings(**overrides) -> Settings:
         max_run_tokens=int(os.getenv("RP_MAX_RUN_TOKENS", "60000")),
         defenses=os.getenv("RP_DEFENSES", "on").lower() not in ("off", "0", "false", "no"),
         prompt_version=os.getenv("RP_PROMPTS", "v1"),
+        block_private_urls=os.getenv("RP_BLOCK_PRIVATE_URLS", "on").lower() not in ("off", "0", "false", "no"),
         base_url=os.getenv("RP_BASE_URL", base_url),
         api_key=os.getenv(key_env) if key_env else None,
         tavily_api_key=os.getenv("TAVILY_API_KEY") or None,
