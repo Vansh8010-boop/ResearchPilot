@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.3"
+      - name: Install dependencies
+        run: uv sync --frozen --extra api --extra ui
+      - name: Run tests
+        run: uv run pytest -q
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t research-pilot .
+      - name: Validate compose file
+        run: |
+          touch .env
+          docker compose config --quiet
+      - name: Smoke test the API container
+        run: |
+          docker run -d --name api -p 8000:8000 research-pilot
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8000/health && exit 0
+            sleep 1
+          done
+          docker logs api
+          exit 1
+      - name: Smoke test the UI container
+        run: |
+          docker run -d --name ui -p 8501:8501 research-pilot \
+            streamlit run ui/app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8501/_stcore/health && exit 0
+            sleep 1
+          done
+          docker logs ui
+          exit 1
