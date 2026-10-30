@@ -2,12 +2,25 @@
 
 An autonomous research agent: it breaks a question down, searches the web, reads pages, does exact arithmetic, and answers with cited sources.
 
-**Status: week 4.** Two agents share three tools, a tool cache and per-run JSON traces:
+**Status: week 5.** Two agents share three tools, a tool cache and per-run JSON traces:
 
 - `plan` (default): a planner writes a short JSON plan, an executor runs each step in its own bounded tool loop, and a synthesizer writes the cited answer from the step findings.
 - `react`: the week 1 baseline, a single think → call tools → observe loop with a hard step limit.
 
-There is also a 15-task benchmark with automatic grading, a 6-page prompt-injection suite, and a set of defenses that can be switched on and off, and an evaluation toolkit (LLM judge, hand-label calibration, failure analysis, versioned prompts). The FastAPI/Streamlit/Docker layer comes in week 5.
+There is also a 15-task benchmark with automatic grading, a 6-page prompt-injection suite, and a set of defenses that can be switched on and off, and an evaluation toolkit (LLM judge, hand-label calibration, failure analysis, versioned prompts), and a FastAPI service with a Streamlit UI, packaged for Docker.
+
+## Results
+
+> In progress. The free Groq tier allows about 13 benchmark runs a day, so this table fills in as runs complete.
+
+| run | agent | prompts | defenses | runs | task success (grader / judge) | tool success | injection followed | avg tokens |
+|---|---|---|---|---|---|---|---|---|
+| plan_baseline | plan | v1 | off | 22/45 | 95.5% / 90.9% | 97.8% | 1/2 | 12,973 |
+| react_baseline | react | n/a | off | not run | | | | |
+| plan_v2 | plan | v2 | off | not run | | | | |
+| inject_off / inject_on | plan | v1 | off / on | not run | | | | |
+
+Judge: `qwen/qwen3.8-27b`. Calibration against hand labels: pending.
 
 ## Setup
 
@@ -35,6 +48,33 @@ uv run rp --no-cache "..."   # bypass the tool cache
 ```
 
 Each run prints the plan, the tool calls and each step's finding as they happen, then the final answer and the path of its trace in `traces/`. Add `--agent react` for the baseline agent.
+
+## Web app (week 5)
+
+```bash
+uv sync --extra api --extra ui
+uv run uvicorn research_pilot.api:app --port 8000      # terminal 1
+uv run streamlit run ui/app.py                          # terminal 2, opens http://localhost:8501
+```
+
+The API runs each question as a background job, one at a time (free-tier rate limits and a laptop's memory both favour sequential runs):
+
+| endpoint | does |
+|---|---|
+| `POST /research` | `{"question": ..., "agent": "plan", "defenses": true, "prompts": "v1"}` returns `202 {"id": ...}` |
+| `GET /research/{id}?since=N` | status, plan, answer, stats, and the progress events after the first N |
+| `GET /research` | recent jobs |
+| `GET /health` | provider, model, defaults |
+
+Defenses are on by default for API requests. Set `RP_API_TOKEN` to require `Authorization: Bearer <token>`. The UI talks only to the API and needs no model keys. It shows the plan, each tool call (✓, ✗ or ⛔ blocked) and each step's finding as they happen, then the answer, its sources and run stats.
+
+### Docker
+
+```bash
+docker compose up --build      # API on :8000, UI on :8501
+```
+
+One image serves both containers. Only the API container reads `.env`, and the tool cache and traces live on a named volume. To use Ollama on the host from inside Docker, set `RP_BASE_URL=http://host.docker.internal:11434/v1`.
 
 ## Benchmark
 
@@ -110,6 +150,9 @@ src/research_pilot/
   tracing.py          per-run JSON trace (LLM calls, tool calls, tokens, latency)
   config.py           settings from env / .env
   cli.py              `rp` command
+  api.py              FastAPI job service
+ui/app.py             Streamlit front end
+Dockerfile, docker-compose.yml
 bench/
   tasks.jsonl         15 tasks with reference answers and checks
   injection_tasks.jsonl  6 prompt-injection attacks

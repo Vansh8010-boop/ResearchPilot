@@ -11,11 +11,15 @@ dependencies = [
     "trafilatura>=2.0",
 ]
 
+[project.optional-dependencies]
+api = ["fastapi>=0.115", "uvicorn>=0.30"]
+ui = ["streamlit>=1.40"]
+
 [project.scripts]
 rp = "research_pilot.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "fastapi>=0.115"]
 
 [build-system]
 requires = ["hatchling"]
