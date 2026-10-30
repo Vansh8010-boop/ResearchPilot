@@ -4,6 +4,8 @@
 
 An autonomous research agent: it breaks a question down, searches the web, reads pages, does exact arithmetic, and answers with cited sources.
 
+**Live demo: [researchpilot-taupe.vercel.app](https://researchpilot-taupe.vercel.app/)**. Recorded runs are open to everyone; live questions need a password.
+
 **Status: week 5.** Two agents share three tools, a tool cache and per-run JSON traces:
 
 - `plan` (default): a planner writes a short JSON plan, an executor runs each step in its own bounded tool loop, and a synthesizer writes the cited answer from the step findings.
