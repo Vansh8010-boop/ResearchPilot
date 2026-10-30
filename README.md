@@ -2,12 +2,12 @@
 
 An autonomous research agent: it breaks a question down, searches the web, reads pages, does exact arithmetic, and answers with cited sources.
 
-**Status: week 3.** Two agents share three tools, a tool cache and per-run JSON traces:
+**Status: week 4.** Two agents share three tools, a tool cache and per-run JSON traces:
 
 - `plan` (default): a planner writes a short JSON plan, an executor runs each step in its own bounded tool loop, and a synthesizer writes the cited answer from the step findings.
 - `react`: the week 1 baseline, a single think → call tools → observe loop with a hard step limit.
 
-There is also a 15-task benchmark with automatic grading, a 6-page prompt-injection suite, and a set of defenses that can be switched on and off. LLM-as-judge evaluation and the FastAPI/Streamlit/Docker layer come in later weeks.
+There is also a 15-task benchmark with automatic grading, a 6-page prompt-injection suite, and a set of defenses that can be switched on and off, and an evaluation toolkit (LLM judge, hand-label calibration, failure analysis, versioned prompts). The FastAPI/Streamlit/Docker layer comes in week 5.
 
 ## Setup
 
@@ -76,6 +76,21 @@ uv run python -m bench.run --tasks-file injection_tasks.jsonl --repeats 2 --defe
 uv run python -m bench.run --tasks-file injection_tasks.jsonl --repeats 2 --defenses on  --name inject_on
 ```
 
+## Evaluation (week 4)
+
+```bash
+uv run python -m bench.judge     --name plan_baseline   # LLM judge (default groq qwen/qwen3.8-27b)
+uv run python -m bench.label     --name plan_baseline   # hand-label ~15 answers in the terminal
+uv run python -m bench.calibrate --name plan_baseline   # judge and grader vs your labels
+uv run python -m bench.analyze   --name plan_baseline   # failure_report.md
+uv run python -m bench.analyze   --name plan_baseline plan_v2   # comparison table
+```
+
+- **Judge** (`judge.py`): a second model, from a different family than the agent, scores each answer for correctness, completeness and faithfulness (1-5). It flags followed injections from the answer and the tool calls, and picks a failure category. It sees the question, reference, answer, tool calls and fetched text, but not the automatic grader's verdict. A run passes at correctness >= 4 with no injection followed.
+- **Calibration** (`label.py`, `calibrate.py`): you grade a sample by hand, disagreements first. Agreement and Cohen's kappa show whether the judge, the keyword grader or neither can be trusted.
+- **Failure analysis** (`analyze.py`): tags runs from their traces (invented tools, tool errors by tool, repeated fetches and searches, policy blocks, step limits, injections) and estimates the tokens spent re-reading pages.
+- **Prompt versions** (`RP_PROMPTS` / `--prompts v1|v2`): v1 is the baseline. v2 targets the largest failure category in the v1 analysis, plan steps re-fetching pages an earlier step already read.
+
 ## Layout
 
 ```
@@ -100,6 +115,8 @@ bench/
   injection_tasks.jsonl  6 prompt-injection attacks
   fixtures/           test pages for the adversarial tasks
   run.py              runner + summary;  grade.py: automatic grader
+  judge.py            LLM judge;  label.py / calibrate.py: hand labels and agreement
+  analyze.py          failure and efficiency analysis, comparison tables
 tests/                offline tests (fake LLM client, mocked HTTP)
 ```
 
@@ -117,6 +134,7 @@ tests/                offline tests (fake LLM client, mocked HTTP)
 | `RP_MAX_TOOL_TURNS` | `16` | plan agent: tool turns across the whole run |
 | `RP_MAX_TOKENS` | `16000` | max output tokens per model call |
 | `RP_DEFENSES` | `on` | week 3 hardening on/off |
+| `RP_PROMPTS` | `v1` | plan agent prompt version: v1 (baseline) / v2 (groups facts by source) |
 | `RP_MAX_RUN_TOKENS` | `60000` | with defenses on: token budget per run before the agent must answer |
 
 ## Tests

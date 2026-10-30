@@ -70,6 +70,44 @@ SYNTHESIZER_PROMPT = """You are the writer of a research agent. Answer the user'
 - If findings disagree, say so. If something could not be found, say what is missing instead of guessing.
 - Do not add facts that are not in the findings."""
 
+# v2 (week 4): failure analysis of the v1 baseline found 68% of runs re-fetching a page an earlier
+# step had already read. v1's "one fact per step" splits facts from the same page across steps, and
+# each executor only sees earlier findings, not the page. v2 groups facts by source and reuses results.
+PLANNER_PROMPT_V2 = """You are the planner of a research agent. Write a short plan for answering the user's question.
+
+The executor will carry out each step with these tools: web_search (find sources), fetch_page (read a page),
+calculator (exact arithmetic). A separate writer composes the final answer from the step results.
+
+Rules:
+- Use as few steps as possible. Most questions need 1 to 3 steps.
+- At most {max_steps} steps.
+- Organise steps by source, not by fact: facts that will come from the same page belong in ONE step
+  (e.g. "Read the page and record both the 2025 revenue and the headcount").
+- Never add a step that only extracts, locates or records information from a page an earlier step read.
+  The step that reads a page must extract everything needed from it.
+- Name exactly what each step should produce. When a step depends on an earlier result, say so.
+- Calculations get their own step only when they need facts from several earlier steps.
+- Do not add a step for writing the final answer.
+- If the question gives a specific URL, the first step should read it."""
+
+EXECUTOR_PROMPT_V2 = """You are the executor of a research agent. Carry out ONE step of a research plan using the tools.
+
+- First check "Results so far". If they already contain what this step needs, reply from them without calling tools.
+- Do only the current step; other steps are handled separately.
+- Prefer fetch_page on an authoritative source over trusting a search snippet.
+- When you read a page, record every fact on it that the question needs, not only this step's, so later steps
+  never have to re-read it.
+- Do all arithmetic with the calculator.
+- If a tool returns an error, adjust (rephrase, try another source) instead of repeating the same call.
+
+When done, reply with the finding only: the exact facts or numbers, each followed by its source URL.
+If you could not complete the step, start your reply with "NOT FOUND:" and say what you tried."""
+
+PROMPTS = {
+    "v1": {"planner": PLANNER_PROMPT, "executor": EXECUTOR_PROMPT},
+    "v2": {"planner": PLANNER_PROMPT_V2, "executor": EXECUTOR_PROMPT_V2},
+}
+
 STEP_LIMIT_NOTE = (
     "Tool limit for this step reached. Do not call any more tools. "
     "Report what you found so far, or start with NOT FOUND: if you have nothing."
@@ -101,7 +139,7 @@ class PlanExecuteAgent:
         self.on_event = on_event or (lambda kind, data: None)
 
     def _plan(self, llm: LLM, question: str) -> list[str]:
-        system = PLANNER_PROMPT.format(max_steps=self.settings.max_plan_steps)
+        system = PROMPTS[self.settings.prompt_version]["planner"].format(max_steps=self.settings.max_plan_steps)
         response = llm.call("plan", system, [{"role": "user", "content": question}], tool_choice=None,
                             json_schema=PLAN_SCHEMA)
         if response.stop_reason == "refusal":
@@ -130,7 +168,7 @@ class PlanExecuteAgent:
                 f"Question: {question}\n\nPlan:\n{_format_plan(plan, index)}\n\n"
                 f"Results so far:\n{_format_findings(findings)}\n\nCurrent step ({index}): {goal}"
             )
-            system = EXECUTOR_PROMPT + ("\n\n" + SECURITY_RULES if defenses else "")
+            system = PROMPTS[self.settings.prompt_version]["executor"] + ("\n\n" + SECURITY_RULES if defenses else "")
             loop = tool_loop(llm, self.toolbox, f"step{index}", system,
                              [{"role": "user", "content": prompt}],
                              min(self.settings.max_step_turns, budget), STEP_LIMIT_NOTE, dedupe=defenses)
@@ -153,6 +191,7 @@ class PlanExecuteAgent:
         defenses = self.settings.defenses
         trace = Trace(question, f"{self.settings.provider}:{self.settings.model}", self.settings.trace_dir, self.name)
         trace.note("defenses", defenses)
+        trace.note("prompts", self.settings.prompt_version)
         self.toolbox.start_run(question)
         llm = LLM(self.backend, trace, self.on_event,
                   token_budget=self.settings.max_run_tokens if defenses else None)

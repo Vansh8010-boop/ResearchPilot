@@ -51,7 +51,8 @@ def cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int) -
     return (input_tokens * price_in + output_tokens * price_out) / 1e6
 
 
-LOCKED_KEYS = ("agent", "provider", "model", "defenses", "tasks_file")
+LOCKED_KEYS = ("agent", "provider", "model", "defenses", "tasks_file", "prompts")
+LOCK_DEFAULTS = {"prompts": "v1"}  # folders started before a key existed used its default
 
 
 def check_config(out_dir: Path, config: dict) -> str | None:
@@ -61,7 +62,8 @@ def check_config(out_dir: Path, config: dict) -> str | None:
         path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         return None
     saved = json.loads(path.read_text(encoding="utf-8"))
-    diffs = [f"{k}: {saved.get(k)!r} vs now {config[k]!r}" for k in LOCKED_KEYS if saved.get(k) != config[k]]
+    get = lambda c, k: c.get(k, LOCK_DEFAULTS.get(k))
+    diffs = [f"{k}: {get(saved, k)!r} vs now {get(config, k)!r}" for k in LOCKED_KEYS if get(saved, k) != get(config, k)]
     return "; ".join(diffs) or None
 
 
@@ -103,7 +105,7 @@ def summary_markdown(name: str, config: dict, s: dict) -> str:
         f"# Benchmark run: {name}",
         "",
         f"agent `{config['agent']}` | {config['provider']} `{config['model']}` | defenses `{'on' if config['defenses'] else 'off'}` "
-        f"| tasks `{config['tasks_file']}` | {s['runs']} runs",
+        f"| prompts `{config.get('prompts', 'v1')}` | tasks `{config['tasks_file']}` | {s['runs']} runs",
         "",
         "| metric | value |",
         "|---|---|",
@@ -143,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765, help="fixture server port (tasks reference it)")
     parser.add_argument("--defenses", choices=["on", "off"], help="week 3 hardening (default: RP_DEFENSES, on)")
     parser.add_argument("--tasks-file", default="tasks.jsonl", help="task file inside bench/")
+    parser.add_argument("--prompts", choices=["v1", "v2"], help="plan agent prompt version (default: RP_PROMPTS, v1)")
     args = parser.parse_args(argv)
 
     overrides = {}
@@ -154,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["effort"] = args.effort
     if args.defenses:
         overrides["defenses"] = args.defenses == "on"
+    if args.prompts:
+        overrides["prompt_version"] = args.prompts
     settings = load_settings(**overrides)
     name = args.name or f"{args.agent}_{settings.model.replace('/', '-').replace(':', '-')}_{datetime.now():%Y%m%d}"
     out_dir = BENCH_DIR / "results" / name
@@ -162,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     config = {"agent": args.agent, "provider": settings.provider, "model": settings.model, "effort": settings.effort,
               "max_steps": settings.max_steps, "max_step_turns": settings.max_step_turns,
               "max_tool_turns": settings.max_tool_turns, "max_run_tokens": settings.max_run_tokens,
-              "defenses": settings.defenses, "tasks_file": args.tasks_file}
+              "defenses": settings.defenses, "tasks_file": args.tasks_file, "prompts": settings.prompt_version}
     mismatch = check_config(out_dir, config)
     if mismatch:
         print(f"{name} was started with different settings ({mismatch}). "
