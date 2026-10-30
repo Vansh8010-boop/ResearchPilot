@@ -1,5 +1,7 @@
 # ResearchPilot
 
+[![CI](https://github.com/Vansh8010-boop/ResearchPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/Vansh8010-boop/ResearchPilot/actions/workflows/ci.yml)
+
 An autonomous research agent: it breaks a question down, searches the web, reads pages, does exact arithmetic, and answers with cited sources.
 
 **Status: week 5.** Two agents share three tools, a tool cache and per-run JSON traces:
@@ -69,6 +71,8 @@ The API runs each question as a background job, one at a time (free-tier rate li
 Defenses are on by default for API requests. Set `RP_API_TOKEN` to require `Authorization: Bearer <token>`. The UI talks only to the API and needs no model keys. It shows the plan, each tool call (✓, ✗ or ⛔ blocked) and each step's finding as they happen, then the answer, its sources and run stats.
 
 ### Docker
+
+CI builds this image and smoke-tests both containers on every push to `main`.
 
 ```bash
 docker compose up --build      # API on :8000, UI on :8501
